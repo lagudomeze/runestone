@@ -81,10 +81,16 @@ If `clippy` emits warnings, fix them before proceeding.
 
 ```bash
 git add {specific files}   # NEVER git add -A; add only relevant files
-git commit -m "{type}: {description}"
+git commit -m "$(cat <<'EOF'
+{type}: {description}
+
+Co-Authored-By: DeepSeek & Claude Code <noreply@anthropic.com>
+EOF
+)"
 ```
 
 Use conventional commit format. Keep subject under 72 chars.
+**Every commit MUST include the `Co-Authored-By: DeepSeek & Claude Code <noreply@anthropic.com>` trailer.**
 
 ### Step 5: Push the branch
 
@@ -98,7 +104,8 @@ Default remote is `runestone` (git@github.com:lagudomeze/runestone.git). Fall ba
 
 If `gh` is available:
 ```bash
-gh pr create --title "{type}: {description}" --body "$(cat <<'EOF'
+gh pr create --repo lagudomeze/runestone --title "{type}: {description}" \
+  --body "$(cat <<'EOF'
 ## Summary
 {1-2 bullet points}
 
@@ -108,9 +115,13 @@ gh pr create --title "{type}: {description}" --body "$(cat <<'EOF'
 - [x] cargo build
 - [x] cargo test
 - [x] cargo clippy -- -D warnings
+
+Co-Authored-By: DeepSeek & Claude Code <noreply@anthropic.com>
 EOF
 )" --base main --head {branch-name}
 ```
+
+**Always use `--repo lagudomeze/runestone`** because the `origin` remote may point to a different repo.
 
 If `gh` is NOT available:
 - Print: "Open a PR at https://github.com/lagudomeze/runestone/pull/new/{branch-name}"
