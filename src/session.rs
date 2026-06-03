@@ -1,11 +1,13 @@
-use crate::error::{IntoExn, Result};
-use crate::git_repo::GitRepo;
-use crate::memory::MemoryChange;
+use std::{io::Write, path::PathBuf, sync::Arc};
+
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::Mutex;
+
+use crate::{
+    error::{IntoExn, Result},
+    git_repo::GitRepo,
+    memory::MemoryChange,
+};
 
 /// A single message in a conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +29,8 @@ pub struct Session {
     offset_file: PathBuf,
 }
 
-/// Manages session lifecycle: creation, message appending, offset-based commits.
+/// Manages session lifecycle: creation, message appending, offset-based
+/// commits.
 pub struct SessionManager {
     data_dir: PathBuf,
     lock: Arc<Mutex<()>>,
@@ -35,19 +38,13 @@ pub struct SessionManager {
 
 /// Result of a commit operation.
 pub enum CommitResult {
-    Committed {
-        messages_processed: usize,
-        changes: Vec<MemoryChange>,
-    },
+    Committed { messages_processed: usize, changes: Vec<MemoryChange> },
     NoNewMessages,
 }
 
 impl SessionManager {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self {
-            data_dir,
-            lock: Arc::new(Mutex::new(())),
-        }
+        Self { data_dir, lock: Arc::new(Mutex::new(())) }
     }
 
     /// Open the git repo for a given owner.
@@ -56,12 +53,7 @@ impl SessionManager {
     }
 
     /// Get or create a session directory and return a Session handle.
-    pub fn get_or_create(
-        &self,
-        owner: &str,
-        agent_id: &str,
-        session_id: &str,
-    ) -> Result<Session> {
+    pub fn get_or_create(&self, owner: &str, agent_id: &str, session_id: &str) -> Result<Session> {
         let base_path = self
             .data_dir
             .join(owner)
@@ -104,11 +96,7 @@ impl SessionManager {
         role: String,
         content: String,
     ) -> Result<()> {
-        let msg = Message {
-            role,
-            content,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
+        let msg = Message { role, content, timestamp: chrono::Utc::now().to_rfc3339() };
         let line = serde_json::to_string(&msg).into_exn()? + "\n";
 
         let mut file = std::fs::OpenOptions::new()
@@ -147,10 +135,7 @@ impl SessionManager {
             session.owner, session.agent_id, session.session_id, total
         ))?;
 
-        Ok(CommitResult::Committed {
-            messages_processed: new_message_count,
-            changes: vec![],
-        })
+        Ok(CommitResult::Committed { messages_processed: new_message_count, changes: vec![] })
     }
 
     /// Read the full message history for a session.
@@ -159,10 +144,8 @@ impl SessionManager {
             return Ok(vec![]);
         }
         let content = std::fs::read_to_string(&session.messages_file).into_exn()?;
-        let messages: Vec<Message> = content
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
+        let messages: Vec<Message> =
+            content.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
         Ok(messages)
     }
 }
@@ -214,9 +197,7 @@ mod tests {
 
         let result = unwrap(mgr.commit_session(&mut session).await);
         match result {
-            CommitResult::Committed {
-                messages_processed, ..
-            } => assert_eq!(messages_processed, 2),
+            CommitResult::Committed { messages_processed, .. } => assert_eq!(messages_processed, 2),
             _ => panic!("expected Committed"),
         }
         assert_eq!(session.offset, 2);

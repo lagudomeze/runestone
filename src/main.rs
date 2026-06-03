@@ -1,7 +1,7 @@
-use clap::{Parser, Subcommand};
-use runestone::error::Result;
-use runestone::session::SessionManager;
 use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use runestone::{error::Result, session::SessionManager};
 
 /// Runestone — a personal AI memory system based on Rust + Git.
 #[derive(Parser)]
@@ -150,37 +150,20 @@ async fn handle_session(data_dir: PathBuf, cmd: SessionCmd) -> Result<()> {
     let mgr = SessionManager::new(data_dir);
 
     match cmd {
-        SessionCmd::Create {
-            owner,
-            agent,
-            session,
-        } => {
+        SessionCmd::Create { owner, agent, session } => {
             let s = mgr.get_or_create(&owner, &agent, &session)?;
             println!("Session created: {}/{}/{}", s.owner, s.agent_id, s.session_id);
             println!("Path: {}", s.base_path.display());
         }
-        SessionCmd::Add {
-            owner,
-            agent,
-            session,
-            role,
-            content,
-        } => {
+        SessionCmd::Add { owner, agent, session, role, content } => {
             let s = mgr.get_or_create(&owner, &agent, &session)?;
             mgr.add_message(&s, role, content).await?;
             println!("Message appended to {}/{}/{}", owner, agent, session);
         }
-        SessionCmd::Commit {
-            owner,
-            agent,
-            session,
-        } => {
+        SessionCmd::Commit { owner, agent, session } => {
             let mut s = mgr.get_or_create(&owner, &agent, &session)?;
             match mgr.commit_session(&mut s).await? {
-                runestone::session::CommitResult::Committed {
-                    messages_processed,
-                    ..
-                } => {
+                runestone::session::CommitResult::Committed { messages_processed, .. } => {
                     println!(
                         "Commit successful: {} messages processed, offset now {}",
                         messages_processed, s.offset
@@ -191,11 +174,7 @@ async fn handle_session(data_dir: PathBuf, cmd: SessionCmd) -> Result<()> {
                 }
             }
         }
-        SessionCmd::History {
-            owner,
-            agent,
-            session,
-        } => {
+        SessionCmd::History { owner, agent, session } => {
             let s = mgr.get_or_create(&owner, &agent, &session)?;
             let messages = mgr.read_full_history(&s)?;
             for msg in &messages {
