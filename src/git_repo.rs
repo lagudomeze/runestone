@@ -1,6 +1,8 @@
-use crate::error::{IntoExn, Result, RunestoneError};
-use git2::{IndexAddOption, Repository, Signature};
 use std::path::{Path, PathBuf};
+
+use git2::{IndexAddOption, Repository, Signature};
+
+use crate::error::{IntoExn, Result, RunestoneError};
 
 /// Git repository wrapper, one per owner at `./data/{owner}/`.
 pub struct GitRepo {
@@ -35,9 +37,7 @@ impl GitRepo {
         if path.is_absolute() {
             path.to_path_buf()
         } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(path)
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
         }
     }
 
@@ -57,9 +57,7 @@ impl GitRepo {
         let abs = self.resolve(dir);
         let relative = abs.strip_prefix(&self.workdir).unwrap_or(&abs);
         let spec = relative.to_string_lossy();
-        index
-            .add_all([spec.as_ref()], IndexAddOption::DEFAULT, None)
-            .into_exn()?;
+        index.add_all([spec.as_ref()], IndexAddOption::DEFAULT, None).into_exn()?;
         index.write().into_exn()?;
         Ok(())
     }
@@ -80,10 +78,8 @@ impl GitRepo {
         };
         let parent_refs: Vec<&git2::Commit<'_>> = parents.iter().collect();
 
-        let oid = self
-            .repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-            .into_exn()?;
+        let oid =
+            self.repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs).into_exn()?;
         Ok(oid)
     }
 }

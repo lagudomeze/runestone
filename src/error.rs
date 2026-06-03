@@ -15,11 +15,7 @@ pub enum RunestoneError {
     Json(#[from] serde_json::Error),
 
     #[error("session not found: {owner}/{agent_id}/{session_id}")]
-    SessionNotFound {
-        owner: String,
-        agent_id: String,
-        session_id: String,
-    },
+    SessionNotFound { owner: String, agent_id: String, session_id: String },
 
     #[error("{0}")]
     Other(String),

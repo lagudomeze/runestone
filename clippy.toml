@@ -1,0 +1,14 @@
+# Clippy lints configuration for Runestone
+# Project preference: warn on all clippy lints by default,
+# but allow specific ones that conflict with our style.
+
+# Allow specific lints
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true
+
+# Disallowed methods
+disallowed-methods = [
+    # Prefer .into_exn()? over unwrap/expect in non-test code
+    # "std::result::Result::unwrap",
+    # "std::option::Option::unwrap",
+]
