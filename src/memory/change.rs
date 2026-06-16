@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Structured memory change produced by the Memory Extractor.
+/// Structured memory change produced by the Memory Extractor (Phase 2).
 /// Each variant maps to a file that should be created or updated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemoryChange {

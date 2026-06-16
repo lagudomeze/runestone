@@ -21,10 +21,15 @@ cargo clippy -- -D warnings
 cargo fmt --all
 
 # End-to-end CLI smoke test
-cargo run -- session create --owner alice --agent mybot --session s1
-cargo run -- session add --owner alice --agent mybot --session s1 --role user --content "hello"
-cargo run -- session commit --owner alice --agent mybot --session s1
-cargo run -- session history --owner alice --agent mybot --session s1
+cargo run -- --owner alice session create --agent mybot --session s1
+cargo run -- --owner alice session add --agent mybot --session s1 --role user --content "hello"
+cargo run -- --owner alice session commit --agent mybot --session s1
+cargo run -- --owner alice session history --agent mybot --session s1
+
+# Memory operations
+cargo run -- --owner alice memory store --kind preference --key lang --content "Rust"
+cargo run -- --owner alice memory load --kind preference --key lang
+cargo run -- --owner alice memory list --scope all
 
 # Build on CI (stable — do NOT use nightly)
 cargo build --verbose && cargo test --verbose
@@ -34,9 +39,40 @@ cargo build --verbose && cargo test --verbose
 
 **Runestone** is a personal AI memory system: CLI → session manager → git storage.
 
+### Project structure
+
+```
+src/
+├── lib.rs           # Public API — Runestone facade, re-exports
+├── error.rs         # RunestoneError + IntoExn trait + Result alias
+├── git_repo.rs      # GitRepo (internal, not exposed publicly)
+├── session.rs       # SessionManager (internal), Session/Message/CommitResult (public)
+├── memory.rs        # MemoryChange enum
+└── bin/
+    └── runestone.rs # CLI binary
+```
+
+- **lib** provides a single entry point: `Runestone::new(data_dir)`
+- **bin** is a thin CLI wrapper around the lib
+- `SessionManager` and `GitRepo` are `pub(crate)` — internal, not part of the public API
+
+### Public API
+
+```rust
+use runestone::Runestone;
+
+let rs = Runestone::new("./data");
+let s = rs.session_open("alice", "mybot", "s1")?;       // create or open
+rs.session_add(&s, "user", "hello").await?;              // append message
+let result = rs.session_commit(&s).await?;               // commit offset
+let history = rs.session_history(&s)?;                    // read all messages
+```
+
+`session_commit` takes `&Session` (not `&mut`) because `offset` is stored in a `Cell<usize>`.
+
 ### Error handling (critical pattern)
 
-All functions return `runestone::error::Result<T>` (alias for `exn::Result<T, RunestoneError>`). Foreign errors (`std::io::Error`, `git2::Error`, `serde_json::Error`) must be converted via `.into_exn()?` — the `?` operator alone won't work because `exn::Exn<RunestoneError>` needs explicit wrapping.
+All functions return `runestone::Result<T>` (alias for `exn::Result<T, RunestoneError>`). Foreign errors (`std::io::Error`, `git2::Error`, `serde_json::Error`) must be converted via `.into_exn()?` — the `?` operator alone won't work because `exn::Exn<RunestoneError>` needs explicit wrapping.
 
 ```rust
 // Correct:
@@ -50,8 +86,8 @@ The `IntoExn` trait is blanket-implemented for any `Result<T, E>` where `Runesto
 
 ### Data flow
 
-1. CLI (`src/main.rs`) parses subcommands via `clap`, creates a `SessionManager`, dispatches to handler functions.
-2. `SessionManager` (`src/session.rs`) owns a `data_dir: PathBuf`. Each call to `get_or_create` creates directories under `./data/{owner}/agents/{agent_id}/sessions/{session_id}/`.
+1. CLI (`src/bin/runestone.rs`) parses subcommands via `clap`, creates a `Runestone`, dispatches to handler functions.
+2. `Runestone` (`src/lib.rs`) delegates to `SessionManager` which handles directory creation under `./data/{owner}/agents/{agent_id}/sessions/{session_id}/`.
 3. `GitRepo` (`src/git_repo.rs`) wraps `git2::Repository`. Each owner gets an independent git repo at `./data/{owner}/`. `open_or_init` creates the repo if it doesn't exist.
 4. Commit flow: lock → count lines in `messages.jsonl` → write new offset to `.commit_offset` → `git add` + `git commit`.
 
@@ -59,7 +95,7 @@ The `IntoExn` trait is blanket-implemented for any `Result<T, E>` where `Runesto
 
 - **git2 not gitoxide**: git2 is mature with a clean API for our simple needs (init, add, commit). gitoxide's API is still evolving and requires 3-5x more code for the same operations.
 - **exn not eyre/anyhow**: `exn` provides structured error trees with automatic backtrace. Required `nightly` at v0.1, but v0.3+ works on stable.
-- **Single binary**: `src/main.rs` is the only binary target. Library modules are re-exported through `src/lib.rs`.
+- **lib + bin split**: `src/lib.rs` is the library entry point with a clean `Runestone` facade. `src/bin/runestone.rs` is the CLI binary. Internal modules are `pub(crate)`.
 - **`.into_exn()?` pattern exists because `exn::Result<T, E>` wraps errors in `Exn<E>`**, so `?` can't auto-convert from `std::io::Error` to `Exn<RunestoneError>` in one hop.
 
 ### What's implemented (Phase 1) vs stubbed

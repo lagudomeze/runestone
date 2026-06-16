@@ -28,7 +28,8 @@ impl GitRepo {
         Ok(Self { repo, workdir })
     }
 
-    pub fn workdir(&self) -> &Path {
+    #[allow(dead_code)]
+    pub(crate) fn workdir(&self) -> &Path {
         &self.workdir
     }
 
@@ -52,7 +53,8 @@ impl GitRepo {
     }
 
     /// Stage all files under a directory.
-    pub fn add_dir(&self, dir: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) fn add_dir(&self, dir: &Path) -> Result<()> {
         let mut index = self.repo.index().into_exn()?;
         let abs = self.resolve(dir);
         let relative = abs.strip_prefix(&self.workdir).unwrap_or(&abs);

@@ -1,10 +1,11 @@
-use std::{io::Write, path::PathBuf, sync::Arc};
+use std::{cell::Cell, io::Write, path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
     error::{IntoExn, Result},
+    extractor::Extractor,
     git_repo::GitRepo,
     memory::MemoryChange,
 };
@@ -17,43 +18,81 @@ pub struct Message {
     pub timestamp: String,
 }
 
-/// Represents an open session.
-#[derive(Debug, Clone)]
+/// Handle to an open session. Tracks the commit offset via internal mutability
+/// so that operations like commit can take `&self`.
+#[derive(Debug)]
 pub struct Session {
     pub owner: String,
     pub agent_id: String,
     pub session_id: String,
     pub base_path: PathBuf,
-    pub offset: usize,
     messages_file: PathBuf,
     offset_file: PathBuf,
+    offset: Cell<usize>,
+}
+
+impl Session {
+    /// Returns the current commit offset (number of lines already committed).
+    pub fn offset(&self) -> usize {
+        self.offset.get()
+    }
 }
 
 /// Manages session lifecycle: creation, message appending, offset-based
-/// commits.
-pub struct SessionManager {
+/// commits. Cheap to clone — the lock is shared.
+#[derive(Clone)]
+pub(crate) struct SessionManager {
     data_dir: PathBuf,
     lock: Arc<Mutex<()>>,
+    extractor: Option<Arc<dyn Extractor>>,
 }
 
 /// Result of a commit operation.
+#[derive(Debug)]
 pub enum CommitResult {
     Committed { messages_processed: usize, changes: Vec<MemoryChange> },
     NoNewMessages,
 }
 
+impl CommitResult {
+    /// Number of messages processed, or 0 if nothing to commit.
+    pub fn messages_processed(&self) -> usize {
+        match self {
+            CommitResult::Committed { messages_processed, .. } => *messages_processed,
+            CommitResult::NoNewMessages => 0,
+        }
+    }
+
+    /// Memory changes extracted by the LLM (empty in Phase 1).
+    pub fn changes(&self) -> &[MemoryChange] {
+        match self {
+            CommitResult::Committed { changes, .. } => changes,
+            CommitResult::NoNewMessages => &[],
+        }
+    }
+}
+
 impl SessionManager {
-    pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir, lock: Arc::new(Mutex::new(())) }
+    pub(crate) fn new(data_dir: PathBuf) -> Self {
+        Self { data_dir, lock: Arc::new(Mutex::new(())), extractor: None }
+    }
+
+    pub(crate) fn set_extractor(&mut self, ext: Arc<dyn Extractor>) {
+        self.extractor = Some(ext);
     }
 
     /// Open the git repo for a given owner.
-    pub fn repo_for_owner(&self, owner: &str) -> Result<GitRepo> {
+    fn repo_for_owner(&self, owner: &str) -> Result<GitRepo> {
         GitRepo::open_or_init(&self.data_dir.join(owner))
     }
 
     /// Get or create a session directory and return a Session handle.
-    pub fn get_or_create(&self, owner: &str, agent_id: &str, session_id: &str) -> Result<Session> {
+    pub(crate) fn get_or_create(
+        &self,
+        owner: &str,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<Session> {
         let base_path = self
             .data_dir
             .join(owner)
@@ -83,14 +122,14 @@ impl SessionManager {
             agent_id: agent_id.to_string(),
             session_id: session_id.to_string(),
             base_path,
-            offset,
+            offset: Cell::new(offset),
             messages_file,
             offset_file,
         })
     }
 
     /// Append a message to the session's messages.jsonl.
-    pub async fn add_message(
+    pub(crate) async fn add_message(
         &self,
         session: &Session,
         role: String,
@@ -108,8 +147,9 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Commit unprocessed messages for a session.
-    pub async fn commit_session(&self, session: &mut Session) -> Result<CommitResult> {
+    /// Commit unprocessed messages. Uses `&Session` (not `&mut`) thanks to
+    /// `Cell<usize>` for the offset.
+    pub(crate) async fn commit_session(&self, session: &Session) -> Result<CommitResult> {
         let _guard = self.lock.lock().await;
 
         let total = if session.messages_file.exists() {
@@ -119,12 +159,22 @@ impl SessionManager {
             0
         };
 
-        if session.offset >= total {
+        let cur_offset = session.offset.get();
+        if cur_offset >= total {
             return Ok(CommitResult::NoNewMessages);
         }
 
-        let new_message_count = total - session.offset;
-        session.offset = total;
+        let new_message_count = total - cur_offset;
+
+        // Phase 2: extract memories from new messages
+        let changes = if let Some(ext) = &self.extractor {
+            let new_msgs = read_messages_range(&session.messages_file, cur_offset)?;
+            ext.extract(&new_msgs).await.unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        session.offset.set(total);
         std::fs::write(&session.offset_file, total.to_string()).into_exn()?;
 
         let repo = self.repo_for_owner(&session.owner)?;
@@ -135,11 +185,11 @@ impl SessionManager {
             session.owner, session.agent_id, session.session_id, total
         ))?;
 
-        Ok(CommitResult::Committed { messages_processed: new_message_count, changes: vec![] })
+        Ok(CommitResult::Committed { messages_processed: new_message_count, changes })
     }
 
     /// Read the full message history for a session.
-    pub fn read_full_history(&self, session: &Session) -> Result<Vec<Message>> {
+    pub(crate) fn read_full_history(&self, session: &Session) -> Result<Vec<Message>> {
         if !session.messages_file.exists() {
             return Ok(vec![]);
         }
@@ -148,6 +198,17 @@ impl SessionManager {
             content.lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
         Ok(messages)
     }
+}
+
+/// Read messages from a specific line offset to end of file.
+fn read_messages_range(file: &PathBuf, offset: usize) -> Result<Vec<Message>> {
+    if !file.exists() {
+        return Ok(vec![]);
+    }
+    let content = std::fs::read_to_string(file).into_exn()?;
+    let messages: Vec<Message> =
+        content.lines().skip(offset).filter_map(|line| serde_json::from_str(line).ok()).collect();
+    Ok(messages)
 }
 
 #[cfg(test)]
@@ -173,7 +234,7 @@ mod tests {
         let mgr = SessionManager::new(dir.clone());
 
         let session = unwrap(mgr.get_or_create("alice", "mybot", "s1"));
-        assert_eq!(session.offset, 0);
+        assert_eq!(session.offset(), 0);
 
         unwrap(mgr.add_message(&session, "user".into(), "Hello".into()).await);
 
@@ -190,19 +251,22 @@ mod tests {
         let dir = test_dir("commit_offset");
         let mgr = SessionManager::new(dir.clone());
 
-        let mut session = unwrap(mgr.get_or_create("alice", "mybot", "s1"));
+        let session = unwrap(mgr.get_or_create("alice", "mybot", "s1"));
 
         unwrap(mgr.add_message(&session, "user".into(), "msg1".into()).await);
         unwrap(mgr.add_message(&session, "user".into(), "msg2".into()).await);
 
-        let result = unwrap(mgr.commit_session(&mut session).await);
+        let result = unwrap(mgr.commit_session(&session).await);
         match result {
-            CommitResult::Committed { messages_processed, .. } => assert_eq!(messages_processed, 2),
+            CommitResult::Committed { messages_processed, .. } => {
+                assert_eq!(messages_processed, 2)
+            }
             _ => panic!("expected Committed"),
         }
-        assert_eq!(session.offset, 2);
+        assert_eq!(session.offset(), 2);
 
-        let result = unwrap(mgr.commit_session(&mut session).await);
+        // No new messages
+        let result = unwrap(mgr.commit_session(&session).await);
         match result {
             CommitResult::NoNewMessages => {}
             _ => panic!("expected NoNewMessages"),
