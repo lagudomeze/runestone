@@ -1,0 +1,21 @@
+[package]
+name = "runestone-cli"
+description = "Personal AI memory system based on Rust + Git — CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords = ["ai", "memory", "llm", "git", "agent", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "runestone"
+path = "src/main.rs"
+
+[dependencies]
+runestone.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true

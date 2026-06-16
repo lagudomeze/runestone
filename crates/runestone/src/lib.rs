@@ -1,3 +1,5 @@
+#![deny(unused_crate_dependencies)]
+
 //! # Runestone
 //!
 //! A personal AI memory system based on Rust + Git.
