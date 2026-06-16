@@ -36,3 +36,86 @@ pub trait MemoryKind {
     /// Deserialize from stored text.
     fn decode(&self, raw: &str) -> Result<Self::Value>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_path() {
+        assert_eq!(Profile.path().to_string_lossy(), "memory/profile.md");
+    }
+
+    #[test]
+    fn profile_encode_decode() {
+        let v = "Alice, engineer".to_string();
+        let encoded = Profile.encode(&v);
+        assert_eq!(encoded, v);
+        let decoded = Profile.decode(&encoded).unwrap();
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn preference_path() {
+        let p = Preference { key: "language".into() };
+        assert_eq!(p.path().to_string_lossy(), "memory/preferences/language.md");
+    }
+
+    #[test]
+    fn preference_encode_decode() {
+        let p = Preference { key: "editor".into() };
+        let v = "vim".to_string();
+        let encoded = p.encode(&v);
+        assert_eq!(encoded, v);
+        let decoded = p.decode(&encoded).unwrap();
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn entity_path() {
+        let e = Entity { name: "rust".into() };
+        assert_eq!(e.path().to_string_lossy(), "memory/entities/rust.md");
+    }
+
+    #[test]
+    fn entity_encode_decode() {
+        let e = Entity { name: "rust".into() };
+        let v = "A systems programming language".to_string();
+        let encoded = e.encode(&v);
+        assert_eq!(encoded, v);
+        let decoded = e.decode(&encoded).unwrap();
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn event_path() {
+        let e = Event { title: "decided-on-redis".into() };
+        assert_eq!(e.path().to_string_lossy(), "memory/events/decided-on-redis.md");
+    }
+
+    #[test]
+    fn event_encode_decode() {
+        let e = Event { title: "something".into() };
+        let v = "Decided to use Redis for caching".to_string();
+        let encoded = e.encode(&v);
+        assert_eq!(encoded, v);
+        let decoded = e.decode(&encoded).unwrap();
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn case_path() {
+        let c = Case { agent: "mybot".into(), title: "fix-timeout".into() };
+        assert_eq!(c.path().to_string_lossy(), "agents/mybot/memory/cases/fix-timeout.md");
+    }
+
+    #[test]
+    fn case_encode_decode() {
+        let c = Case { agent: "bot".into(), title: "t1".into() };
+        let v = "Use timeout + retry".to_string();
+        let encoded = c.encode(&v);
+        assert_eq!(encoded, v);
+        let decoded = c.decode(&encoded).unwrap();
+        assert_eq!(decoded, v);
+    }
+}

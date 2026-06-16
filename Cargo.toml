@@ -12,7 +12,6 @@ authors = ["lagudomeze"]
 
 [workspace.dependencies]
 runestone = { path = "crates/runestone" }
-async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 exn = "0.3.1"

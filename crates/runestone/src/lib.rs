@@ -14,7 +14,6 @@
 //! let rs = Runestone::new("./data", "alice");
 //! let agent = rs.agent("mybot");
 //!
-//! // Sessions are scoped to the agent
 //! let s = agent.session_open("s1").unwrap();
 //! agent.session_add(&s, "user", "Hello").await.unwrap();
 //! let result = agent.session_commit(&s).await.unwrap();
@@ -24,29 +23,22 @@
 //! # }
 //! ```
 //!
-//! ## Memory operations
+//! ## With LLM extraction
 //!
 //! ```no_run
-//! use runestone::{MemoryKind, Preference, Profile, Runestone};
+//! # #[tokio::main]
+//! # async fn main() {
+//! use rig::providers;
+//! use runestone::{MemoryKind, Preference, Profile, Runestone, extractor::RigExtractor};
 //!
-//! let rs = Runestone::new("./data", "alice");
-//!
-//! // Global memory — on Runestone
-//! rs.memory_store(&Profile, &"Alice, engineer".to_string()).unwrap();
-//! assert_eq!(rs.memory_load(&Profile).unwrap(), Some("Alice, engineer".to_string()));
-//!
-//! // Agent memory — on Agent
-//! let agent = rs.agent("mybot");
-//! let pref = Preference { key: "language".into() };
-//! agent.memory_store(&pref, &"Rust".to_string()).unwrap();
-//! assert_eq!(agent.memory_load(&pref).unwrap(), Some("Rust".to_string()));
+//! // let model = providers::openai::Client::from_env().completion_model("gpt-4o-mini");
+//! // let rs = Runestone::new("./data", "alice").with_extractor(RigExtractor::new(model));
+//! # }
 //! ```
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
+use extractor::Extractor;
 use session::SessionManager;
 
 use crate::error::IntoExn;
@@ -65,36 +57,41 @@ pub use session::{CommitResult, Message, Session};
 
 // ── Runestone ────────────────────────────────────────────────────────────────
 
-/// Entry point for the Runestone memory system.
-///
-/// Owns user-level (global) memories. Use [`agent`](Self::agent) to get an
-/// agent-scoped handle for session and agent-level memory operations.
-pub struct Runestone {
+/// Entry point. Generic over the extractor type `E`.
+/// Use `Runestone::new(...)` for no extraction, or
+/// `.with_extractor(RigExtractor::new(model))` for LLM-powered extraction.
+pub struct Runestone<E: Extractor = ()> {
     owner: String,
     data_dir: PathBuf,
-    sessions: SessionManager,
+    sessions: SessionManager<E>,
 }
 
-impl Runestone {
+impl Runestone<()> {
     pub fn new(data_dir: impl Into<PathBuf>, owner: impl Into<String>) -> Self {
         let dir: PathBuf = data_dir.into();
         Self { owner: owner.into(), sessions: SessionManager::new(dir.clone()), data_dir: dir }
     }
+}
 
-    /// Attach an LLM extractor. When set, every [`Agent::session_commit`] will
-    /// run extraction and populate [`CommitResult::changes`].
-    pub fn with_extractor(mut self, ext: impl crate::extractor::Extractor + 'static) -> Self {
-        self.sessions.set_extractor(Arc::new(ext));
-        self
+impl<E: Extractor> Runestone<E> {
+    /// Attach an extractor. The returned `Runestone` has a different type
+    /// parameter — `session_commit` will automatically run extraction.
+    pub fn with_extractor<E2: Extractor>(self, ext: E2) -> Runestone<E2> {
+        Runestone {
+            owner: self.owner,
+            data_dir: self.data_dir.clone(),
+            sessions: self.sessions.with_extractor(ext),
+        }
     }
 
     pub fn owner(&self) -> &str {
         &self.owner
     }
 
-    /// Get a handle to an agent. Agents own sessions and agent-level memories.
-    /// The handle is cheap to create and can outlive this `Runestone`.
-    pub fn agent(&self, agent_id: &str) -> Agent {
+    pub fn agent(&self, agent_id: &str) -> Agent<E>
+    where
+        E: Clone,
+    {
         Agent {
             owner: self.owner.clone(),
             id: agent_id.to_string(),
@@ -113,7 +110,6 @@ impl Runestone {
         read_memory(&self.owner, &self.data_dir, kind)
     }
 
-    /// List all memory files across global and all agent directories.
     pub fn memory_list(&self) -> Result<Vec<String>> {
         let base = self.data_dir.join(&self.owner);
         let mut files = Vec::new();
@@ -135,20 +131,14 @@ impl Runestone {
 
 // ── Agent ────────────────────────────────────────────────────────────────────
 
-/// A handle to a specific agent.
-///
-/// Agents own sessions and agent-level memories. An agent is created via
-/// [`Runestone::agent`] and is independent of the `Runestone` instance —
-/// it can outlive it thanks to shared ownership of the underlying session
-/// manager (via `Clone`).
-pub struct Agent {
+pub struct Agent<E: Extractor = ()> {
     owner: String,
     id: String,
     data_dir: PathBuf,
-    sessions: SessionManager,
+    sessions: SessionManager<E>,
 }
 
-impl Agent {
+impl<E: Extractor> Agent<E> {
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -166,9 +156,6 @@ impl Agent {
         self.sessions.add_message(session, role.to_string(), content.to_string()).await
     }
 
-    /// Commit unprocessed messages. In Phase 2 the agent will asynchronously
-    /// extract memories from committed messages and write them to its memory
-    /// directory.
     pub async fn session_commit(&self, session: &Session) -> Result<CommitResult> {
         self.sessions.commit_session(session).await
     }
@@ -187,7 +174,6 @@ impl Agent {
         read_memory(&self.owner, &self.data_dir, kind)
     }
 
-    /// List memory files under this agent's directory.
     pub fn memory_list(&self) -> Result<Vec<String>> {
         let base = self.data_dir.join(&self.owner).join("agents").join(&self.id).join("memory");
         let mut files = Vec::new();
@@ -213,8 +199,7 @@ fn write_memory<K: MemoryKind + ?Sized>(
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent).into_exn()?;
     }
-    let content = kind.encode(value);
-    std::fs::write(&full, content).into_exn()?;
+    std::fs::write(&full, kind.encode(value)).into_exn()?;
     Ok(())
 }
 

@@ -1,6 +1,5 @@
-use std::sync::Arc;
+use std::future::Future;
 
-use async_trait::async_trait;
 use rig::{
     agent::AgentBuilder,
     completion::{CompletionModel, Prompt},
@@ -15,10 +14,24 @@ use crate::{
 
 // ── Extraction trait ────────────────────────────────────────────────────────
 
-/// Type-erased extraction interface. Implementations can use any LLM backend.
-#[async_trait]
-pub trait Extractor: Send + Sync {
-    async fn extract(&self, messages: &[Message]) -> Result<Vec<MemoryChange>>;
+/// Extraction interface. Implement for any LLM backend.
+/// A no-op implementation is provided for `()`.
+pub trait Extractor {
+    fn extract(
+        &self,
+        messages: &[Message],
+    ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send;
+}
+
+/// No-op: returns empty changes. Used when no LLM extractor is configured.
+impl Extractor for () {
+    #[allow(clippy::manual_async_fn)]
+    fn extract(
+        &self,
+        _messages: &[Message],
+    ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send {
+        async { Ok(vec![]) }
+    }
 }
 
 // ── rig-backed implementation ────────────────────────────────────────────────
@@ -37,6 +50,7 @@ Valid change types and their required fields:
 Return [] if nothing new. Output raw JSON only, no markdown blocks."#;
 
 /// Memory extractor backed by a rig CompletionModel.
+#[derive(Clone)]
 pub struct RigExtractor<M: CompletionModel> {
     agent: rig::agent::Agent<M>,
 }
@@ -48,19 +62,25 @@ impl<M: CompletionModel> RigExtractor<M> {
     }
 }
 
-#[async_trait]
 impl<M> Extractor for RigExtractor<M>
 where
     M: CompletionModel + Send + Sync + 'static,
 {
-    async fn extract(&self, messages: &[Message]) -> Result<Vec<MemoryChange>> {
-        if messages.is_empty() {
-            return Ok(vec![]);
-        }
+    #[allow(clippy::manual_async_fn)]
+    fn extract(
+        &self,
+        messages: &[Message],
+    ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send {
         let prompt = format_messages(messages);
-        let response =
-            self.agent.prompt(prompt).await.map_err(|e| RunestoneError::Other(e.to_string()))?;
-        Ok(parse_changes(&response))
+        let agent = self.agent.clone();
+        async move {
+            if prompt == "## Conversation\n\n" {
+                return Ok(vec![]);
+            }
+            let response =
+                agent.prompt(prompt).await.map_err(|e| RunestoneError::Other(e.to_string()))?;
+            Ok(parse_changes(&response))
+        }
     }
 }
 
@@ -147,9 +167,138 @@ impl RawChange {
     }
 }
 
-// ── Factory ─────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Message;
 
-/// Create a type-erased extractor from any rig CompletionModel.
-pub fn from_model<M: CompletionModel + Send + Sync + 'static>(model: M) -> Arc<dyn Extractor> {
-    Arc::new(RigExtractor::new(model))
+    #[test]
+    fn test_format_messages() {
+        let msgs = vec![
+            Message { role: "user".into(), content: "I like Rust".into(), timestamp: "now".into() },
+            Message {
+                role: "assistant".into(),
+                content: "Rust is great!".into(),
+                timestamp: "now".into(),
+            },
+        ];
+        let out = format_messages(&msgs);
+        assert!(out.contains("**user**: I like Rust"));
+        assert!(out.contains("**assistant**: Rust is great!"));
+        assert!(out.starts_with("## Conversation"));
+    }
+
+    #[test]
+    fn test_format_messages_empty() {
+        let out = format_messages(&[]);
+        assert_eq!(out, "## Conversation\n\n");
+    }
+
+    #[test]
+    fn test_parse_empty_array() {
+        let changes = parse_changes("[]");
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_profile() {
+        let json = r#"[{"type": "GlobalProfile", "content": "Alice is an engineer"}]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            MemoryChange::GlobalProfile { content } => assert!(content.contains("Alice")),
+            _ => panic!("expected GlobalProfile"),
+        }
+    }
+
+    #[test]
+    fn test_parse_preference() {
+        let json = r#"[{"type": "GlobalPreference", "key": "language", "value": "Rust"}]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 1);
+        match &changes[0] {
+            MemoryChange::GlobalPreference { key, value } => {
+                assert_eq!(key, "language");
+                assert_eq!(value, "Rust");
+            }
+            _ => panic!("expected GlobalPreference"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entity() {
+        let json = r#"[{"type": "GlobalEntity", "name": "rust", "description": "A language"}]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_event() {
+        let json = r#"[{"type": "GlobalEvent", "title": "Decision", "detail": "Use Redis"}]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_agent_case() {
+        let json = r#"[{"type": "AgentCase", "agent_id": "bot", "title": "Timeout", "content": "Add retry"}]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_multiple_changes() {
+        let json = r#"[
+            {"type": "GlobalProfile", "content": "Bob"},
+            {"type": "GlobalPreference", "key": "editor", "value": "vim"}
+        ]"#;
+        let changes = parse_changes(json);
+        assert_eq!(changes.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_from_code_block() {
+        let raw = "Some text\n```json\n[{\"type\": \"GlobalProfile\", \"content\": \
+                   \"Alice\"}]\n```\nMore text";
+        let changes = parse_changes(raw);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_invalid_json_returns_empty() {
+        let changes = parse_changes("not json at all");
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unknown_type_skipped() {
+        let json = r#"[{"type": "UnknownType", "content": "nope"}]"#;
+        let changes = parse_changes(json);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_parse_partial_missing_fields() {
+        let json = r#"[{"type": "GlobalPreference", "key": null, "value": null}]"#;
+        let changes = parse_changes(json);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_extract_code_block_found() {
+        let text = "Prefix\n```json\n{\"a\": 1}\n```\nSuffix";
+        let result = extract_code_block(text, "json");
+        assert_eq!(result, Some("{\"a\": 1}".into()));
+    }
+
+    #[test]
+    fn test_extract_code_block_not_found() {
+        assert_eq!(extract_code_block("no blocks here", "json"), None);
+    }
+
+    #[tokio::test]
+    async fn test_noop_extractor() {
+        let changes = ().extract(&[]).await.unwrap();
+        assert!(changes.is_empty());
+    }
 }

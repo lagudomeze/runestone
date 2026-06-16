@@ -32,19 +32,18 @@ pub struct Session {
 }
 
 impl Session {
-    /// Returns the current commit offset (number of lines already committed).
     pub fn offset(&self) -> usize {
         self.offset.get()
     }
 }
 
-/// Manages session lifecycle: creation, message appending, offset-based
-/// commits. Cheap to clone — the lock is shared.
+/// Manages session lifecycle. Generic over the extractor type `E` (defaults
+/// to `()` — no extraction). Cheap to clone — the lock is shared.
 #[derive(Clone)]
-pub(crate) struct SessionManager {
+pub(crate) struct SessionManager<E: Extractor = ()> {
     data_dir: PathBuf,
     lock: Arc<Mutex<()>>,
-    extractor: Option<Arc<dyn Extractor>>,
+    extractor: E,
 }
 
 /// Result of a commit operation.
@@ -55,7 +54,6 @@ pub enum CommitResult {
 }
 
 impl CommitResult {
-    /// Number of messages processed, or 0 if nothing to commit.
     pub fn messages_processed(&self) -> usize {
         match self {
             CommitResult::Committed { messages_processed, .. } => *messages_processed,
@@ -63,7 +61,6 @@ impl CommitResult {
         }
     }
 
-    /// Memory changes extracted by the LLM (empty in Phase 1).
     pub fn changes(&self) -> &[MemoryChange] {
         match self {
             CommitResult::Committed { changes, .. } => changes,
@@ -72,21 +69,22 @@ impl CommitResult {
     }
 }
 
-impl SessionManager {
+impl SessionManager<()> {
     pub(crate) fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir, lock: Arc::new(Mutex::new(())), extractor: None }
+        Self { data_dir, lock: Arc::new(Mutex::new(())), extractor: () }
+    }
+}
+
+impl<E: Extractor> SessionManager<E> {
+    /// Change the extractor type (consumes self, reuses shared lock).
+    pub(crate) fn with_extractor<E2: Extractor>(self, ext: E2) -> SessionManager<E2> {
+        SessionManager { data_dir: self.data_dir, lock: self.lock, extractor: ext }
     }
 
-    pub(crate) fn set_extractor(&mut self, ext: Arc<dyn Extractor>) {
-        self.extractor = Some(ext);
-    }
-
-    /// Open the git repo for a given owner.
     fn repo_for_owner(&self, owner: &str) -> Result<GitRepo> {
         GitRepo::open_or_init(&self.data_dir.join(owner))
     }
 
-    /// Get or create a session directory and return a Session handle.
     pub(crate) fn get_or_create(
         &self,
         owner: &str,
@@ -128,7 +126,6 @@ impl SessionManager {
         })
     }
 
-    /// Append a message to the session's messages.jsonl.
     pub(crate) async fn add_message(
         &self,
         session: &Session,
@@ -147,8 +144,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Commit unprocessed messages. Uses `&Session` (not `&mut`) thanks to
-    /// `Cell<usize>` for the offset.
     pub(crate) async fn commit_session(&self, session: &Session) -> Result<CommitResult> {
         let _guard = self.lock.lock().await;
 
@@ -165,14 +160,8 @@ impl SessionManager {
         }
 
         let new_message_count = total - cur_offset;
-
-        // Phase 2: extract memories from new messages
-        let changes = if let Some(ext) = &self.extractor {
-            let new_msgs = read_messages_range(&session.messages_file, cur_offset)?;
-            ext.extract(&new_msgs).await.unwrap_or_default()
-        } else {
-            vec![]
-        };
+        let new_msgs = read_messages_range(&session.messages_file, cur_offset)?;
+        let changes = self.extractor.extract(&new_msgs).await.unwrap_or_default();
 
         session.offset.set(total);
         std::fs::write(&session.offset_file, total.to_string()).into_exn()?;
@@ -188,7 +177,6 @@ impl SessionManager {
         Ok(CommitResult::Committed { messages_processed: new_message_count, changes })
     }
 
-    /// Read the full message history for a session.
     pub(crate) fn read_full_history(&self, session: &Session) -> Result<Vec<Message>> {
         if !session.messages_file.exists() {
             return Ok(vec![]);
@@ -200,7 +188,6 @@ impl SessionManager {
     }
 }
 
-/// Read messages from a specific line offset to end of file.
 fn read_messages_range(file: &PathBuf, offset: usize) -> Result<Vec<Message>> {
     if !file.exists() {
         return Ok(vec![]);
@@ -232,17 +219,13 @@ mod tests {
     async fn test_create_and_add_message() {
         let dir = test_dir("create_add");
         let mgr = SessionManager::new(dir.clone());
-
         let session = unwrap(mgr.get_or_create("alice", "mybot", "s1"));
         assert_eq!(session.offset(), 0);
-
         unwrap(mgr.add_message(&session, "user".into(), "Hello".into()).await);
-
         let history = unwrap(mgr.read_full_history(&session));
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, "user");
         assert_eq!(history[0].content, "Hello");
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -250,28 +233,20 @@ mod tests {
     async fn test_commit_and_offset() {
         let dir = test_dir("commit_offset");
         let mgr = SessionManager::new(dir.clone());
-
         let session = unwrap(mgr.get_or_create("alice", "mybot", "s1"));
-
         unwrap(mgr.add_message(&session, "user".into(), "msg1".into()).await);
         unwrap(mgr.add_message(&session, "user".into(), "msg2".into()).await);
-
         let result = unwrap(mgr.commit_session(&session).await);
         match result {
-            CommitResult::Committed { messages_processed, .. } => {
-                assert_eq!(messages_processed, 2)
-            }
+            CommitResult::Committed { messages_processed, .. } => assert_eq!(messages_processed, 2),
             _ => panic!("expected Committed"),
         }
         assert_eq!(session.offset(), 2);
-
-        // No new messages
         let result = unwrap(mgr.commit_session(&session).await);
         match result {
             CommitResult::NoNewMessages => {}
             _ => panic!("expected NoNewMessages"),
         }
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
