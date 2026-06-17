@@ -3,9 +3,11 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use runestone::{Case, Entity, Event, Preference, Profile, Result, Runestone, RunestoneError};
+use runestone::{
+    Case, Entity, Event, NoopExtractor, Preference, Profile, Result, Runestone, RunestoneError,
+    extractor::Extractor,
+};
 
-/// Runestone — a personal AI memory system based on Rust + Git.
 #[derive(Parser)]
 #[command(name = "runestone", about, version)]
 struct Cli {
@@ -77,9 +79,7 @@ enum MemoryCmd {
         #[arg(long, default_value = "5")]
         limit: usize,
     },
-    /// List all memory files
     List {
-        /// Optional: restrict to a specific agent
         #[arg(long)]
         agent: Option<String>,
     },
@@ -126,14 +126,24 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let rs = Runestone::new(cli.data_dir, cli.owner);
 
-    match cli.command {
+    // Auto-detect LLM extractor from env vars, fall back to NoopExtractor
+    if let Some(ext) = runestone::extractor::from_env() {
+        let rs = Runestone::new(cli.data_dir, cli.owner, ext);
+        dispatch(cli.command, &rs).await
+    } else {
+        let rs = Runestone::new(cli.data_dir, cli.owner, NoopExtractor);
+        dispatch(cli.command, &rs).await
+    }
+}
+
+async fn dispatch<E: Extractor + Clone>(cmd: Commands, rs: &Runestone<E>) -> Result<()> {
+    match cmd {
         Commands::Session { agent, action } => {
             let a = rs.agent(&agent);
             handle_session(&a, action).await
         }
-        Commands::Memory { action } => handle_memory(&rs, action),
+        Commands::Memory { action } => handle_memory(rs, action),
         Commands::Git { .. } => handle_git(),
         Commands::Index { .. } => handle_index(),
     }
@@ -142,7 +152,7 @@ async fn run() -> Result<()> {
 // ── Session
 // ───────────────────────────────────────────────────────────────────
 
-async fn handle_session(agent: &runestone::Agent, cmd: SessionCmd) -> Result<()> {
+async fn handle_session<E: Extractor>(agent: &runestone::Agent<E>, cmd: SessionCmd) -> Result<()> {
     match cmd {
         SessionCmd::Create { session } => {
             let s = agent.session_open(&session)?;
@@ -157,12 +167,17 @@ async fn handle_session(agent: &runestone::Agent, cmd: SessionCmd) -> Result<()>
         SessionCmd::Commit { session } => {
             let s = agent.session_open(&session)?;
             match agent.session_commit(&s).await? {
-                runestone::CommitResult::Committed { messages_processed, .. } => {
+                runestone::CommitResult::Committed { messages_processed, changes } => {
                     println!(
-                        "Commit successful: {} messages processed, offset now {}",
+                        "Commit successful: {} messages processed, {} changes extracted, offset \
+                         now {}",
                         messages_processed,
+                        changes.len(),
                         s.offset()
                     );
+                    for c in &changes {
+                        println!("  → {c:?}");
+                    }
                 }
                 runestone::CommitResult::NoNewMessages => {
                     println!("No new messages to commit.");
@@ -183,7 +198,7 @@ async fn handle_session(agent: &runestone::Agent, cmd: SessionCmd) -> Result<()>
 
 // ── Memory ────────────────────────────────────────────────────────────────────
 
-fn handle_memory(rs: &Runestone, cmd: MemoryCmd) -> Result<()> {
+fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) -> Result<()> {
     match cmd {
         MemoryCmd::Search { query, limit } => match rs.memory_search(&query, limit) {
             Ok(hits) => {
@@ -211,22 +226,16 @@ fn handle_memory(rs: &Runestone, cmd: MemoryCmd) -> Result<()> {
             dispatch_store(rs, &kind, key, agent, &content)?;
             println!("Stored.");
         }
-        MemoryCmd::Load { kind, key, agent } => {
-            let val = dispatch_load(rs, &kind, key, agent)?;
-            match val {
-                Some(v) => println!("{v}"),
-                None => println!("(not found)"),
-            }
-        }
+        MemoryCmd::Load { kind, key, agent } => match dispatch_load(rs, &kind, key, agent)? {
+            Some(v) => println!("{v}"),
+            None => println!("(not found)"),
+        },
     }
     Ok(())
 }
 
-// ── Dispatch helpers
-// ──────────────────────────────────────────────────────────
-
-fn dispatch_store(
-    rs: &Runestone,
+fn dispatch_store<E: Extractor>(
+    rs: &Runestone<E>,
     kind: &str,
     key: Option<String>,
     agent: Option<String>,
@@ -259,8 +268,8 @@ fn dispatch_store(
     }
 }
 
-fn dispatch_load(
-    rs: &Runestone,
+fn dispatch_load<E: Extractor>(
+    rs: &Runestone<E>,
     kind: &str,
     key: Option<String>,
     agent: Option<String>,
@@ -290,8 +299,6 @@ fn dispatch_load(
         .into()),
     }
 }
-
-// ── Stubs ─────────────────────────────────────────────────────────────────────
 
 fn handle_git() -> Result<()> {
     println!("Git sync is not yet implemented.");

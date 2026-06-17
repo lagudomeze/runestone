@@ -2,6 +2,7 @@ use std::future::Future;
 
 use rig::{
     agent::AgentBuilder,
+    client::CompletionClient,
     completion::{CompletionModel, Prompt},
 };
 use serde::Deserialize;
@@ -12,31 +13,116 @@ use crate::{
     session::Message,
 };
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
+/// A file entry passed to the summarizer.
+#[derive(Debug, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    pub content: String,
+}
+
+/// Prompt templates for summary generation. Use `{dir_name}`, `{files}`,
+/// `{existing_abstract}` as placeholders.
+#[derive(Debug, Clone)]
+pub struct SummaryPrompts {
+    /// Template for L0 abstract generation. Placeholders:
+    /// - `{dir_name}` — directory name
+    /// - `{existing_abstract}` — the previous abstract, or "(none)"
+    /// - `{files}` — file listing (auto-generated from FileEntry list)
+    pub summarize: String,
+
+    /// Template for L1 overview generation. Placeholders:
+    /// - `{dir_name}` — directory name
+    /// - `{children}` — child directory summaries (auto-generated)
+    pub overview: String,
+}
+
+impl Default for SummaryPrompts {
+    fn default() -> Self {
+        Self {
+            summarize: concat!(
+                "You are a directory summarizer. ",
+                "Existing abstract: {existing_abstract}\n\n",
+                "Updated files:\n{files}\n\n",
+                "Write ONE concise sentence (max 100 tokens) merging the existing abstract ",
+                "with the updated files. Output only the summary text, no markdown, no JSON."
+            )
+            .to_string(),
+            overview: concat!(
+                "You are a directory overview generator.\n",
+                "Contents:\n{children}\n\n",
+                "Write a structured markdown overview for directory '{dir_name}' (max 2k tokens). ",
+                "For each entry write one descriptive line. Output only the overview, no preamble."
+            )
+            .to_string(),
+        }
+    }
+}
+
 // ── Extraction trait ────────────────────────────────────────────────────────
 
-/// Extraction interface. Implement for any LLM backend.
-/// A no-op implementation is provided for `()`.
 pub trait Extractor {
     fn extract(
         &self,
         messages: &[Message],
     ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send;
+
+    /// Summarize files in a directory. `existing_abstract` is the previous
+    /// L0 content, or `None` on first generation. `files` contains only
+    /// the **new or changed** files since last summary.
+    fn summarize_directory(
+        &self,
+        dir_name: &str,
+        existing_abstract: Option<&str>,
+        files: &[FileEntry],
+    ) -> impl Future<Output = Result<String>> + Send;
+
+    fn generate_overview(
+        &self,
+        dir_name: &str,
+        children: &[FileEntry],
+    ) -> impl Future<Output = Result<String>> + Send;
 }
 
-/// No-op: returns empty changes. Used when no LLM extractor is configured.
-impl Extractor for () {
-    #[allow(clippy::manual_async_fn)]
-    fn extract(
-        &self,
-        _messages: &[Message],
-    ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send {
-        async { Ok(vec![]) }
+// ── No-op extractor ──────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct NoopExtractor;
+
+impl Extractor for NoopExtractor {
+    async fn extract(&self, _messages: &[Message]) -> Result<Vec<MemoryChange>> {
+        Ok(vec![])
     }
+
+    async fn summarize_directory(
+        &self,
+        dir_name: &str,
+        _existing: Option<&str>,
+        files: &[FileEntry],
+    ) -> Result<String> {
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        Ok(format!("{}: {}", dir_name, names.join(", ")))
+    }
+
+    async fn generate_overview(&self, dir_name: &str, children: &[FileEntry]) -> Result<String> {
+        let content = children
+            .iter()
+            .map(|f| format!("- {}: {}", f.name, f.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(format!("## {}\n\n{}", dir_name, content))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_extractor() -> impl Extractor {
+    NoopExtractor
 }
 
 // ── rig-backed implementation ────────────────────────────────────────────────
 
-const SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Analyze the conversation and output ONLY a JSON array of changes.
+const EXTRACT_PROMPT: &str = r#"You are a memory extraction system. Analyze the conversation and output ONLY a JSON array of changes.
 
 Valid change types and their required fields:
 - {"type": "GlobalProfile", "content": "..."}
@@ -45,20 +131,43 @@ Valid change types and their required fields:
 - {"type": "GlobalEvent", "title": "...", "detail": "..."}
 - {"type": "AgentCase", "agent_id": "...", "title": "...", "content": "..."}
 - {"type": "AgentPattern", "agent_id": "...", "name": "...", "workflow": "..."}
+- {"type": "AgentTool", "agent_id": "...", "name": "...", "usage": "..."}
+- {"type": "AgentSkill", "agent_id": "...", "name": "...", "steps": "..."}
 - {"type": "UpdateAbstract", "session_path": "...", "content": "..."}
+- {"type": "UpdateOverview", "session_path": "...", "content": "..."}
 
+For UpdateAbstract/UpdateOverview: merge new info with existing content if provided.
 Return [] if nothing new. Output raw JSON only, no markdown blocks."#;
 
 /// Memory extractor backed by a rig CompletionModel.
 #[derive(Clone)]
 pub struct RigExtractor<M: CompletionModel> {
-    agent: rig::agent::Agent<M>,
+    extract_agent: rig::agent::Agent<M>,
+    summarize_agent: rig::agent::Agent<M>,
+    overview_agent: rig::agent::Agent<M>,
+    prompts: SummaryPrompts,
 }
 
 impl<M: CompletionModel> RigExtractor<M> {
     pub fn new(model: M) -> Self {
-        let agent = AgentBuilder::new(model).preamble(SYSTEM_PROMPT).build();
-        Self { agent }
+        let m2 = model.clone();
+        let m3 = model.clone();
+        Self {
+            extract_agent: AgentBuilder::new(model).preamble(EXTRACT_PROMPT).build(),
+            summarize_agent: AgentBuilder::new(m2)
+                .preamble("You are a directory summarizer.")
+                .build(),
+            overview_agent: AgentBuilder::new(m3)
+                .preamble("You are a directory overview generator.")
+                .build(),
+            prompts: SummaryPrompts::default(),
+        }
+    }
+
+    /// Customize the summary prompts.
+    pub fn with_prompts(mut self, prompts: SummaryPrompts) -> Self {
+        self.prompts = prompts;
+        self
     }
 }
 
@@ -66,22 +175,84 @@ impl<M> Extractor for RigExtractor<M>
 where
     M: CompletionModel + Send + Sync + 'static,
 {
-    #[allow(clippy::manual_async_fn)]
-    fn extract(
-        &self,
-        messages: &[Message],
-    ) -> impl Future<Output = Result<Vec<MemoryChange>>> + Send {
+    async fn extract(&self, messages: &[Message]) -> Result<Vec<MemoryChange>> {
         let prompt = format_messages(messages);
-        let agent = self.agent.clone();
-        async move {
-            if prompt == "## Conversation\n\n" {
-                return Ok(vec![]);
-            }
-            let response =
-                agent.prompt(prompt).await.map_err(|e| RunestoneError::Other(e.to_string()))?;
-            Ok(parse_changes(&response))
+        if prompt == "## Conversation\n\n" {
+            return Ok(vec![]);
         }
+        let response = self
+            .extract_agent
+            .prompt(prompt)
+            .await
+            .map_err(|e| RunestoneError::Other(e.to_string()))?;
+        Ok(parse_changes(&response))
     }
+
+    async fn summarize_directory(
+        &self,
+        dir_name: &str,
+        existing_abstract: Option<&str>,
+        files: &[FileEntry],
+    ) -> Result<String> {
+        let files_text = files
+            .iter()
+            .map(|f| format!("--- {} ---\n{}", f.name, f.content))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let existing = existing_abstract.unwrap_or("(none)");
+
+        let prompt = self
+            .prompts
+            .summarize
+            .replace("{dir_name}", dir_name)
+            .replace("{existing_abstract}", existing)
+            .replace("{files}", &files_text);
+
+        self.summarize_agent
+            .prompt(prompt)
+            .await
+            .map(|r| r.trim().to_string())
+            .map_err(|e| RunestoneError::Other(e.to_string()).into())
+    }
+
+    async fn generate_overview(&self, dir_name: &str, children: &[FileEntry]) -> Result<String> {
+        let children_text = children
+            .iter()
+            .map(|f| format!("- {}: {}", f.name, f.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = self
+            .prompts
+            .overview
+            .replace("{dir_name}", dir_name)
+            .replace("{children}", &children_text);
+
+        self.overview_agent
+            .prompt(prompt)
+            .await
+            .map(|r| r.trim().to_string())
+            .map_err(|e| RunestoneError::Other(e.to_string()).into())
+    }
+}
+
+/// Convenience: build a RigExtractor from environment variables.
+pub fn from_env() -> Option<RigExtractor<rig::providers::openai::CompletionModel>> {
+    let api_key = std::env::var("OPENAI_API_KEY").ok()?;
+    let model_name = std::env::var("RUNESTONE_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+
+    use rig::providers::openai::CompletionsClient;
+    let mut builder = CompletionsClient::builder().api_key(&api_key);
+    if let Ok(base) = std::env::var("OPENAI_API_BASE") {
+        builder = builder.base_url(&base);
+    }
+    let client = builder.build().ok()?;
+    let model = client.completion_model(&model_name);
+    Some(RigExtractor::new(model))
+}
+
+pub fn has_env_credentials() -> bool {
+    std::env::var("OPENAI_API_KEY").is_ok()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -298,7 +469,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_extractor() {
-        let changes = ().extract(&[]).await.unwrap();
+        let ext = NoopExtractor;
+        let changes = ext.extract(&[]).await.unwrap();
         assert!(changes.is_empty());
     }
 }

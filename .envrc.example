@@ -1,0 +1,12 @@
+# Runestone — local environment variables
+# Copy to .envrc and edit:  cp .envrc.example .envrc
+# Then:  direnv allow
+
+# Required — your API key
+export OPENAI_API_KEY="sk-..."
+
+# Optional — custom endpoint (DeepSeek, Ollama, etc.)
+# export OPENAI_API_BASE="https://api.deepseek.com/v1"
+
+# Optional — override model
+# export RUNESTONE_MODEL="gpt-4o-mini"

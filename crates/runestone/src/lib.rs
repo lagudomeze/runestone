@@ -9,9 +9,9 @@
 //! ```no_run
 //! # #[tokio::main]
 //! # async fn main() {
-//! use runestone::Runestone;
+//! use runestone::{NoopExtractor, Runestone};
 //!
-//! let rs = Runestone::new("./data", "alice");
+//! let rs = Runestone::new("./data", "alice", NoopExtractor);
 //! let agent = rs.agent("mybot");
 //!
 //! let s = agent.session_open("s1").unwrap();
@@ -28,11 +28,10 @@
 //! ```no_run
 //! # #[tokio::main]
 //! # async fn main() {
-//! use rig::providers;
-//! use runestone::{MemoryKind, Preference, Profile, Runestone, extractor::RigExtractor};
+//! use runestone::{Runestone, extractor::RigExtractor};
 //!
-//! // let model = providers::openai::Client::from_env().completion_model("gpt-4o-mini");
-//! // let rs = Runestone::new("./data", "alice").with_extractor(RigExtractor::new(model));
+//! // let model = rig::providers::openai::Client::from_env().completion_model("gpt-4o-mini");
+//! // let rs = Runestone::new("./data", "alice", RigExtractor::new(model));
 //! # }
 //! ```
 
@@ -47,35 +46,36 @@ mod error;
 pub mod extractor;
 mod git_repo;
 mod memory;
+mod retriever;
 mod session;
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
 pub use error::{Result, RunestoneError};
+pub use extractor::{FileEntry, NoopExtractor};
 pub use memory::{Case, Entity, Event, MemoryChange, MemoryHit, MemoryKind, Preference, Profile};
 pub use session::{CommitResult, Message, Session};
 
 // ── Runestone ────────────────────────────────────────────────────────────────
 
 /// Entry point. Generic over the extractor type `E`.
-/// Use `Runestone::new(...)` for no extraction, or
-/// `.with_extractor(RigExtractor::new(model))` for LLM-powered extraction.
-pub struct Runestone<E: Extractor = ()> {
+pub struct Runestone<E: Extractor> {
     owner: String,
     data_dir: PathBuf,
     sessions: SessionManager<E>,
 }
 
-impl Runestone<()> {
-    pub fn new(data_dir: impl Into<PathBuf>, owner: impl Into<String>) -> Self {
-        let dir: PathBuf = data_dir.into();
-        Self { owner: owner.into(), sessions: SessionManager::new(dir.clone()), data_dir: dir }
-    }
-}
-
 impl<E: Extractor> Runestone<E> {
-    /// Attach an extractor. The returned `Runestone` has a different type
-    /// parameter — `session_commit` will automatically run extraction.
+    pub fn new(data_dir: impl Into<PathBuf>, owner: impl Into<String>, extractor: E) -> Self {
+        let dir: PathBuf = data_dir.into();
+        Self {
+            owner: owner.into(),
+            sessions: SessionManager::new(dir.clone(), extractor),
+            data_dir: dir,
+        }
+    }
+
+    /// Change the extractor type (consumes self).
     pub fn with_extractor<E2: Extractor>(self, ext: E2) -> Runestone<E2> {
         Runestone {
             owner: self.owner,
@@ -118,9 +118,9 @@ impl<E: Extractor> Runestone<E> {
         Ok(files)
     }
 
-    #[allow(unused_variables)]
     pub fn memory_search(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
-        Err(RunestoneError::Other("memory_search is not yet implemented (Phase 3)".into()).into())
+        let base = self.data_dir.join(&self.owner);
+        retriever::search(&base, &self.data_dir, query, limit)
     }
 
     #[allow(unused_variables)]
@@ -131,7 +131,7 @@ impl<E: Extractor> Runestone<E> {
 
 // ── Agent ────────────────────────────────────────────────────────────────────
 
-pub struct Agent<E: Extractor = ()> {
+pub struct Agent<E: Extractor> {
     owner: String,
     id: String,
     data_dir: PathBuf,
@@ -200,7 +200,38 @@ fn write_memory<K: MemoryKind + ?Sized>(
         std::fs::create_dir_all(parent).into_exn()?;
     }
     std::fs::write(&full, kind.encode(value)).into_exn()?;
+
+    // Regenerate parent directory's L0 abstract
+    regenerate_abstract_for_dir(owner, data_dir, full.parent());
     Ok(())
+}
+
+/// Generate a simple `.abstract.md` for a directory by listing its files.
+fn regenerate_abstract_for_dir(owner: &str, data_dir: &Path, dir: Option<&Path>) {
+    let Some(dir) = dir else { return };
+    let base = data_dir.join(owner);
+    let Ok(rel) = dir.strip_prefix(&base) else { return };
+
+    let mut files: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if p.extension().is_some_and(|e| e == "md")
+                && name != ".abstract.md"
+                && name != ".overview.md"
+                && p.is_file()
+            {
+                files.push(name);
+            }
+        }
+    }
+
+    if files.is_empty() {
+        return;
+    }
+    let summary = format!("{}: {}", rel.to_string_lossy(), files.join(", "));
+    let _ = std::fs::write(dir.join(".abstract.md"), summary);
 }
 
 fn read_memory<K: MemoryKind + ?Sized>(

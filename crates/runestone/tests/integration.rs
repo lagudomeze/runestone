@@ -1,11 +1,15 @@
 use std::path::PathBuf;
 
-use runestone::{Case, CommitResult, Entity, Event, MemoryKind, Preference, Profile, Runestone};
+use runestone::{
+    Case, CommitResult, Entity, Event, MemoryKind, NoopExtractor, Preference, Profile, Runestone,
+};
 
-fn setup(name: &str) -> (Runestone, PathBuf) {
+type Rs = Runestone<NoopExtractor>;
+
+fn setup(name: &str) -> (Rs, PathBuf) {
     let dir = std::env::temp_dir().join(format!("runestone_int_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
-    (Runestone::new(dir.clone(), "testuser"), dir)
+    (Runestone::new(dir.clone(), "testuser", NoopExtractor), dir)
 }
 
 fn unwrap<T>(r: runestone::Result<T>) -> T {
@@ -103,9 +107,10 @@ fn test_memory_list_with_items() {
     rs.memory_store(&pref, &"Rust".to_string()).unwrap();
 
     let files = rs.memory_list().unwrap();
-    assert_eq!(files.len(), 2);
     assert!(files.iter().any(|f| f.contains("profile.md")));
     assert!(files.iter().any(|f| f.contains("preferences/lang.md")));
+    // L0 abstracts are auto-generated
+    assert!(files.iter().any(|f| f.contains(".abstract.md")));
 }
 
 #[test]
@@ -116,8 +121,9 @@ fn test_agent_memory_list() {
     agent.memory_store(&c, &"content".to_string()).unwrap();
 
     let files = agent.memory_list().unwrap();
-    assert_eq!(files.len(), 1);
-    assert!(files[0].contains("cases/t1.md"));
+    assert!(files.iter().any(|f| f.contains("cases/t1.md")));
+    // L0 abstract is auto-generated
+    assert!(files.iter().any(|f| f.contains(".abstract.md")));
 }
 
 // ── Session workflow ─────────────────────────────────────────────────────────
