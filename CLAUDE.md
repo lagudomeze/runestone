@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow rule
+
+Before starting any new development, **always**:
+1. Review the current state of the codebase and `doc/ROADMAP.md`
+2. Update `doc/ROADMAP.md` to reflect actual progress
+3. Present a summary: what's done, what's next, and the recommended next step
+
+Do NOT start coding until the user confirms the direction.
+
 ## Commands
 
 ```bash

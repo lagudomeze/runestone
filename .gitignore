@@ -23,6 +23,9 @@ target
 # Environment (contains secrets — see .envrc.example)
 .envrc
 
+# Embedding model cache
+.fastembed_cache/
+
 # test workspace
 /data
 
