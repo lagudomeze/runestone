@@ -39,12 +39,14 @@ use std::path::{Path, PathBuf};
 
 use extractor::Extractor;
 use session::SessionManager;
+use tokio::sync::Mutex;
 
 use crate::error::IntoExn;
 
 mod error;
 pub mod extractor;
 mod git_repo;
+mod index;
 mod memory;
 mod retriever;
 mod session;
@@ -63,6 +65,7 @@ pub struct Runestone<E: Extractor> {
     owner: String,
     data_dir: PathBuf,
     sessions: SessionManager<E>,
+    index_cache: Mutex<Option<index::Index>>,
 }
 
 impl<E: Extractor> Runestone<E> {
@@ -71,16 +74,18 @@ impl<E: Extractor> Runestone<E> {
         Self {
             owner: owner.into(),
             sessions: SessionManager::new(dir.clone(), extractor),
+            index_cache: Mutex::new(None),
             data_dir: dir,
         }
     }
 
-    /// Change the extractor type (consumes self).
+    /// Change the extractor type (consumes self, preserves index).
     pub fn with_extractor<E2: Extractor>(self, ext: E2) -> Runestone<E2> {
         Runestone {
             owner: self.owner,
             data_dir: self.data_dir.clone(),
             sessions: self.sessions.with_extractor(ext),
+            index_cache: self.index_cache,
         }
     }
 
@@ -118,14 +123,62 @@ impl<E: Extractor> Runestone<E> {
         Ok(files)
     }
 
+    /// Keyword search over memory files (sync, no embedding model needed).
     pub fn memory_search(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
         let base = self.data_dir.join(&self.owner);
         retriever::search(&base, &self.data_dir, query, limit)
     }
 
+    /// Recursive search: vector on L0 → LLM routing → L1 overview → L2 files.
+    pub async fn memory_search_deep(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>>
+    where
+        E: Clone,
+    {
+        let base = self.data_dir.join(&self.owner);
+        let mut cache = self.index_cache.lock().await;
+        if cache.is_none() {
+            *cache = Some(index::Index::build(&base, &self.data_dir).await);
+        }
+        let idx = cache.as_ref().unwrap();
+        idx.recursive_search(query, limit, &self.data_dir, self.sessions.get_extractor().clone())
+            .await
+    }
+
+    /// Semantic search using vector similarity on L0 abstracts.
+    /// Builds the index on first call (downloads model ~80MB).
+    pub async fn memory_search_semantic(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryHit>> {
+        if self.index_cache.lock().await.is_none() {
+            let base = self.data_dir.join(&self.owner);
+            let idx = index::Index::build(&base, &self.data_dir).await;
+            *self.index_cache.lock().await = Some(idx);
+        }
+        let cache = self.index_cache.lock().await;
+        let idx = cache.as_ref().unwrap();
+        idx.search_async(query, limit).await
+    }
+
+    /// Rebuild the semantic search index (re-downloads model if needed).
+    pub async fn index_rebuild(&self) -> Result<()> {
+        let base = self.data_dir.join(&self.owner);
+        let idx = index::Index::build(&base, &self.data_dir).await;
+        *self.index_cache.lock().await = Some(idx);
+        Ok(())
+    }
+
     #[allow(unused_variables)]
     pub fn resource_add(&self, uri: &str) -> Result<()> {
         Err(RunestoneError::Other("resource_add is not yet implemented (Phase 2)".into()).into())
+    }
+
+    /// Sync the owner's git repo with a remote: pull rebase, then push.
+    pub fn sync(&self, remote_url: &str) -> Result<()> {
+        let repo = crate::git_repo::GitRepo::open_or_init(&self.data_dir.join(&self.owner))?;
+        repo.pull_rebase(remote_url)?;
+        repo.push(remote_url)
     }
 }
 

@@ -79,6 +79,10 @@ impl<E: Extractor> SessionManager<E> {
         Self { data_dir, lock: Arc::new(Mutex::new(())), extractor }
     }
 
+    pub(crate) fn get_extractor(&self) -> &E {
+        &self.extractor
+    }
+
     /// Change the extractor type (consumes self, reuses shared lock).
     pub(crate) fn with_extractor<E2: Extractor>(self, ext: E2) -> SessionManager<E2> {
         SessionManager { data_dir: self.data_dir, lock: self.lock, extractor: ext }

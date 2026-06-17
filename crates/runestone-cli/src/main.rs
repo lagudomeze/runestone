@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use runestone::{
-    Case, Entity, Event, NoopExtractor, Preference, Profile, Result, Runestone, RunestoneError,
+    Case, Entity, Event, Preference, Profile, Result, Runestone, RunestoneError,
     extractor::Extractor,
 };
 
@@ -79,6 +79,19 @@ enum MemoryCmd {
         #[arg(long, default_value = "5")]
         limit: usize,
     },
+    /// Semantic recall — for Claude Code hooks (outputs <runestone-recall>)
+    Recall {
+        #[arg(long)]
+        query: String,
+        #[arg(long, default_value = "5")]
+        limit: usize,
+    },
+    /// Context injection — for Claude Code SessionStart hook (outputs
+    /// <runestone-context>)
+    Inject {
+        #[arg(long, default_value = "5")]
+        recent: usize,
+    },
     List {
         #[arg(long)]
         agent: Option<String>,
@@ -105,7 +118,11 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum GitCmd {
-    Sync {},
+    /// Sync with a remote git repository (push + pull rebase)
+    Sync {
+        #[arg(long)]
+        remote: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -127,14 +144,16 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    // Auto-detect LLM extractor from env vars, fall back to NoopExtractor
-    if let Some(ext) = runestone::extractor::from_env() {
-        let rs = Runestone::new(cli.data_dir, cli.owner, ext);
-        dispatch(cli.command, &rs).await
-    } else {
-        let rs = Runestone::new(cli.data_dir, cli.owner, NoopExtractor);
-        dispatch(cli.command, &rs).await
-    }
+    let ext = runestone::extractor::from_env().ok_or_else(|| {
+        RunestoneError::Other(
+            "OPENAI_API_KEY is not set. Please configure your API key.\nCopy .envrc.example to \
+             .envrc, fill in your key, and run: direnv allow"
+                .into(),
+        )
+    })?;
+
+    let rs = Runestone::new(cli.data_dir, cli.owner, ext);
+    dispatch(cli.command, &rs).await
 }
 
 async fn dispatch<E: Extractor + Clone>(cmd: Commands, rs: &Runestone<E>) -> Result<()> {
@@ -143,9 +162,9 @@ async fn dispatch<E: Extractor + Clone>(cmd: Commands, rs: &Runestone<E>) -> Res
             let a = rs.agent(&agent);
             handle_session(&a, action).await
         }
-        Commands::Memory { action } => handle_memory(rs, action),
-        Commands::Git { .. } => handle_git(),
-        Commands::Index { .. } => handle_index(),
+        Commands::Memory { action } => handle_memory(rs, action).await,
+        Commands::Git { action } => handle_git(rs, action),
+        Commands::Index { .. } => handle_index(rs).await,
     }
 }
 
@@ -198,7 +217,7 @@ async fn handle_session<E: Extractor>(agent: &runestone::Agent<E>, cmd: SessionC
 
 // ── Memory ────────────────────────────────────────────────────────────────────
 
-fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) -> Result<()> {
+async fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) -> Result<()> {
     match cmd {
         MemoryCmd::Search { query, limit } => match rs.memory_search(&query, limit) {
             Ok(hits) => {
@@ -211,6 +230,38 @@ fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) -> Res
             }
             Err(e) => println!("{e}"),
         },
+        MemoryCmd::Recall { query, limit } => {
+            let hits = rs.memory_search_deep(&query, limit).await.unwrap_or_default();
+            println!("<runestone-recall>");
+            if hits.is_empty() {
+                println!("(no relevant memories found)");
+            } else {
+                for hit in &hits {
+                    println!("## {}\n{}\n", hit.path, hit.snippet);
+                }
+            }
+            println!("</runestone-recall>");
+        }
+        MemoryCmd::Inject { recent } => {
+            println!("<runestone-context>");
+            if let Ok(files) = rs.memory_list() {
+                let abstracts: Vec<&String> =
+                    files.iter().filter(|f| f.contains(".abstract.md")).collect();
+                for f in abstracts.iter().take(recent) {
+                    // memory_list returns paths relative to ./data/
+                    let path = std::path::PathBuf::from("./data").join(f);
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let short =
+                            f.replace("/.abstract.md", "").replace(&format!("{}/", rs.owner()), "");
+                        println!("- **{short}**: {}", content.trim());
+                    }
+                }
+                if abstracts.is_empty() {
+                    println!("(no context yet)");
+                }
+            }
+            println!("</runestone-context>");
+        }
         MemoryCmd::List { agent } => {
             let files =
                 if let Some(id) = agent { rs.agent(&id).memory_list()? } else { rs.memory_list()? };
@@ -300,12 +351,18 @@ fn dispatch_load<E: Extractor>(
     }
 }
 
-fn handle_git() -> Result<()> {
-    println!("Git sync is not yet implemented.");
+fn handle_git<E: Extractor>(rs: &Runestone<E>, cmd: GitCmd) -> Result<()> {
+    match cmd {
+        GitCmd::Sync { remote } => {
+            rs.sync(&remote)?;
+            println!("Synced with {remote}");
+        }
+    }
     Ok(())
 }
 
-fn handle_index() -> Result<()> {
-    println!("Index rebuild is not yet implemented.");
+async fn handle_index(rs: &Runestone<impl Extractor>) -> Result<()> {
+    rs.index_rebuild().await?;
+    println!("Index rebuilt successfully.");
     Ok(())
 }

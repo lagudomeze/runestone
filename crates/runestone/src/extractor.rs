@@ -83,6 +83,14 @@ pub trait Extractor {
         dir_name: &str,
         children: &[FileEntry],
     ) -> impl Future<Output = Result<String>> + Send;
+
+    /// Given a query and a list of candidate directories (with their L0
+    /// abstracts), return the indices of directories relevant to the query.
+    fn route_directories(
+        &self,
+        query: &str,
+        candidates: &[FileEntry],
+    ) -> impl Future<Output = Result<Vec<usize>>> + Send;
 }
 
 // ── No-op extractor ──────────────────────────────────────────────────────────
@@ -112,6 +120,14 @@ impl Extractor for NoopExtractor {
             .collect::<Vec<_>>()
             .join("\n");
         Ok(format!("## {}\n\n{}", dir_name, content))
+    }
+
+    async fn route_directories(
+        &self,
+        _query: &str,
+        _candidates: &[FileEntry],
+    ) -> Result<Vec<usize>> {
+        Ok((0.._candidates.len()).collect())
     }
 }
 
@@ -213,6 +229,31 @@ where
             .await
             .map(|r| r.trim().to_string())
             .map_err(|e| RunestoneError::Other(e.to_string()).into())
+    }
+
+    async fn route_directories(&self, query: &str, candidates: &[FileEntry]) -> Result<Vec<usize>> {
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut prompt = String::from("Query: ");
+        prompt.push_str(query);
+        prompt.push_str("\n\nCandidate directories (name: abstract):\n");
+        for (i, c) in candidates.iter().enumerate() {
+            prompt.push_str(&format!("[{i}] {}: {}\n", c.name, c.content));
+        }
+        prompt.push_str(
+            "\nReturn a JSON array of indices that are relevant to the query. Example: [0, 3]. \
+             Output only the array.",
+        );
+
+        let response = self
+            .extract_agent
+            .prompt(prompt)
+            .await
+            .map_err(|e| RunestoneError::Other(e.to_string()))?;
+
+        Ok(serde_json::from_str::<Vec<usize>>(response.trim())
+            .unwrap_or_else(|_| (0..candidates.len()).collect()))
     }
 
     async fn generate_overview(&self, dir_name: &str, children: &[FileEntry]) -> Result<String> {
