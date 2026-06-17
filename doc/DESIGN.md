@@ -82,12 +82,85 @@
 - `AgentCase` / `AgentPattern` / `AgentTool` / `AgentSkill`
 - `UpdateAbstract` / `UpdateOverview`
 
-### 4.3 Retriever + Index Manager（Phase 3）
+### 4.3 L0/L1/L2 分层上下文
 
-- 语义检索 + 目录递归检索
-- 向量库：SQLite + sqlite-vec 扩展
-- 索引存储：`~/.local/share/runestone/embeddings/{owner}.db`
-- 支持增量索引和全量重建
+参考 OpenViking，Runestone 实现了三层上下文加载策略。写入时生成摘要，检索时逐级展开，用 LLM 做路由决策而非纯向量匹配。
+
+#### 目录结构
+
+```
+{owner}/
+├── memory/                              ← .abstract.md + .overview.md (L0+L1)
+│   ├── profile.md                       ← 叶子 (L2)
+│   ├── preferences/
+│   │   ├── .abstract.md                 ← L0
+│   │   ├── editor.md                    ← L2
+│   │   └── language.md                  ← L2
+│   ├── entities/
+│   │   ├── .abstract.md                 ← L0
+│   │   └── redis.md                     ← L2
+│   └── events/
+│       ├── .abstract.md                 ← L0
+│       └── decided-redis.md             ← L2
+└── agents/{agent}/memory/               ← .abstract.md + .overview.md (L0+L1)
+    ├── cases/
+    │   ├── .abstract.md                 ← L0
+    │   ├── fix-timeout.md               ← L2
+    │   └── auth-errors.md               ← L2
+    └── patterns/
+        ├── .abstract.md                 ← L0
+        └── error-handling.md            ← L2
+```
+
+| 类型 | abstract (L0) | overview (L1) |
+|------|:---:|:---:|
+| 叶子 `.md` 文件 | — | — |
+| 包含文件的子目录 | ✅ | — |
+| 顶级 memory 目录 | ✅ | ✅ |
+
+#### 三层定义
+
+| 层 | 文件 | 大小 | 用途 |
+|----|------|------|------|
+| L0 | `.abstract.md` | ~100 tokens | 一句话汇总目录内容，用于向量初筛 |
+| L1 | `.overview.md` | ~1-2k tokens | 文件清单 + 各一行描述，LLM 导航决策 |
+| L2 | 原始 `.md` 文件 | 不限 | 完整内容，按需加载 |
+
+#### 生成策略：自底向上
+
+任何写操作（`memory_store` / `session_commit` 提取）之后：
+
+1. 检测脏目录（有文件变更的目录）
+2. 从最深层叶子目录开始，LLM 汇总目录内所有 L2 文件 → 写入 `.abstract.md`（L0）
+3. 向上一级，LLM 聚合所有子目录的 L0 → 写入父目录 L0
+4. 顶级目录额外生成 `.overview.md`（L1）：文件清单 + 各一行描述
+
+#### 目录递归检索
+
+```
+query → embed → 在所有 L0 上向量搜索 → top-K 候选
+  → LLM 遍历候选的 L0 文本，判断哪些相关
+  → 对命中目录，读 L1 (.overview) 确认细节
+  → 需要详情的，加载 L2 文件
+  → 返回结果（路径 + 摘要 + 分数）
+```
+
+每一层决策由 LLM 在文本上做判断，不做纯向量匹配。每步消耗控制在 100-2000 tokens。
+
+### 4.4 Memory 产生路径
+
+| Case | 触发方式 | 说明 |
+|------|---------|------|
+| 直接写入 | `rs.memory_store(kind, value)` | 应用显式设置偏好/实体/事件 |
+| 会话提取 | `agent.session_commit()` | LLM 从对话自动提取 MemoryChange |
+| 资源导入 | `rs.resource_add(uri)` | URL/文件/GitHub → 解析 → memory（Phase 2） |
+| Agent 自主记忆 | `agent.memory_store(case, content)` | Agent 主动决策记录（Phase 4） |
+
+### 4.5 Retriever + Index Manager
+
+- L0 向量索引：每个 `.abstract.md` 生成 embedding，存储在内存/本地文件中
+- 增量索引：commit 后只重索引变更的 L0 文件
+- 全量重建：`index rebuild` CLI 命令
 
 ### 4.4 Git 存储封装
 
