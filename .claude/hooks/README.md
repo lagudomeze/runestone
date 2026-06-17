@@ -8,25 +8,33 @@ Copy these scripts to your project's `.claude/settings.json`:
     "SessionStart": [
       {
         "matcher": "",
-        "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/session_start.sh\""
+        "hooks": [
+          {"type": "command", "command": "bash /path/to/.claude/hooks/session_start.sh"}
+        ]
       }
     ],
     "UserPromptSubmit": [
       {
         "matcher": "",
-        "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/user_prompt_submit.sh\" \"${prompt}\""
+        "hooks": [
+          {"type": "command", "command": "bash /path/to/.claude/hooks/user_prompt_submit.sh \"${prompt}\""}
+        ]
       }
     ],
     "Stop": [
       {
         "matcher": "",
-        "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop.sh\""
+        "hooks": [
+          {"type": "command", "command": "bash /path/to/.claude/hooks/stop.sh"}
+        ]
       }
     ],
     "SessionEnd": [
       {
         "matcher": "",
-        "command": "\"${CLAUDE_PROJECT_DIR}/.claude/hooks/session_end.sh\""
+        "hooks": [
+          {"type": "command", "command": "bash /path/to/.claude/hooks/session_end.sh"}
+        ]
       }
     ]
   }
