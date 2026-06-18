@@ -105,13 +105,13 @@ mod tests {
 
     #[test]
     fn case_path() {
-        let c = Case { agent: "mybot".into(), title: "fix-timeout".into() };
-        assert_eq!(c.path().to_string_lossy(), "agents/mybot/memory/cases/fix-timeout.md");
+        let c = Case { title: "fix-timeout".into() };
+        assert_eq!(c.path().to_string_lossy(), "memory/cases/fix-timeout.md");
     }
 
     #[test]
     fn case_encode_decode() {
-        let c = Case { agent: "bot".into(), title: "t1".into() };
+        let c = Case { title: "t1".into() };
         let v = "Use timeout + retry".to_string();
         let encoded = c.encode(&v);
         assert_eq!(encoded, v);

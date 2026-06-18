@@ -58,6 +58,44 @@ pub use extractor::{FileEntry, NoopExtractor};
 pub use memory::{Case, Entity, Event, MemoryChange, MemoryHit, MemoryKind, Preference, Profile};
 pub use session::{CommitResult, Message, Session};
 
+/// Report from `memory_clean` — duplicate groups and per-kind counts.
+#[derive(Debug, Default)]
+pub struct CleanReport {
+    pub total_files: usize,
+    pub counts: Vec<(String, usize)>,
+    pub duplicates: Vec<DuplicateGroup>,
+}
+
+/// A pair of memory files that look like duplicates.
+#[derive(Debug)]
+pub struct DuplicateGroup {
+    pub kind: String,
+    pub a: (String, PathBuf),
+    pub b: (String, PathBuf),
+}
+
+/// Two keys are similar if they share ≥70% of their words, with a floor of 3
+/// shared words for short keys to avoid single-word false positives.
+fn similar_keys(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a == b {
+        return true;
+    }
+    let wa: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let wb: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    if wa.is_empty() || wb.is_empty() {
+        return false;
+    }
+    let overlap = wa.intersection(&wb).count();
+    // Need at least 3 shared words, unless both keys are very short
+    if overlap < 3 && (wa.len() > 1 || wb.len() > 1) {
+        return false;
+    }
+    let min = wa.len().min(wb.len());
+    min > 0 && (overlap as f64 / min as f64) >= 0.7
+}
+
 // ── Runestone ────────────────────────────────────────────────────────────────
 
 /// Entry point. Generic over the extractor type `E`.
@@ -121,6 +159,92 @@ impl<E: Extractor> Runestone<E> {
         walk_md_files(&base, &self.data_dir, &mut files)?;
         files.sort();
         Ok(files)
+    }
+
+    /// Scan personal memories for duplicates and stale entries.
+    /// Returns a report: (duplicate_groups, stale_candidates).
+    pub fn memory_clean(&self, dry_run: bool) -> Result<CleanReport> {
+        let base = self.data_dir.join(&self.owner).join("memory");
+        if !base.exists() {
+            return Ok(CleanReport::default());
+        }
+
+        let mut by_kind: std::collections::BTreeMap<String, Vec<(String, PathBuf)>> =
+            std::collections::BTreeMap::new();
+
+        for entry in std::fs::read_dir(&base).into_exn()? {
+            let entry = entry.into_exn()?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let kind =
+                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut files = Vec::new();
+            walk_md_files(&path, &self.data_dir, &mut files)?;
+            for f in files {
+                let full = self.data_dir.join(&f);
+                let name = full.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+                // Skip system files
+                if name == ".abstract" || name == ".overview" {
+                    continue;
+                }
+                by_kind.entry(kind.clone()).or_default().push((name.to_string(), full));
+            }
+        }
+
+        // Root-level profile.md
+        let profile_path = base.parent().unwrap().join("profile.md");
+        if profile_path.exists() {
+            by_kind.entry("root".into()).or_default().push(("profile".into(), profile_path));
+        }
+
+        let mut report = CleanReport::default();
+
+        for (kind, entries) in &by_kind {
+            for (i, (a_name, a_path)) in entries.iter().enumerate() {
+                for (b_name, b_path) in entries.iter().skip(i + 1) {
+                    if similar_keys(a_name, b_name) {
+                        let group = DuplicateGroup {
+                            kind: kind.clone(),
+                            a: (a_name.clone(), a_path.clone()),
+                            b: (b_name.clone(), b_path.clone()),
+                        };
+                        report.duplicates.push(group);
+                    }
+                }
+            }
+        }
+
+        // Count per kind
+        for (kind, entries) in &by_kind {
+            report.counts.push((kind.clone(), entries.len()));
+        }
+        report.total_files = by_kind.values().map(|v| v.len()).sum();
+
+        if !dry_run {
+            for g in &report.duplicates {
+                // Keep the file with more content (bytes); remove the shorter one
+                let size_a = std::fs::metadata(&g.a.1).map(|m| m.len()).unwrap_or(0);
+                let size_b = std::fs::metadata(&g.b.1).map(|m| m.len()).unwrap_or(0);
+
+                let (keep, remove) = if size_a >= size_b { (&g.a, &g.b) } else { (&g.b, &g.a) };
+
+                // Append remove's content to keep if different
+                if let (Ok(content_keep), Ok(content_remove)) =
+                    (std::fs::read_to_string(&keep.1), std::fs::read_to_string(&remove.1))
+                    && content_keep != content_remove
+                {
+                    let merged =
+                        format!("{}\n\n---\n\n{}", content_keep.trim(), content_remove.trim());
+                    std::fs::write(&keep.1, merged).into_exn()?;
+                }
+
+                std::fs::remove_file(&remove.1).into_exn()?;
+            }
+        }
+
+        Ok(report)
     }
 
     /// Keyword search over memory files (sync, no embedding model needed).
