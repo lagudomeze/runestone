@@ -26,7 +26,9 @@ struct Embedder {
 }
 
 impl Embedder {
-    fn new() -> Option<Self> {
+    fn new(cache_dir: &Path) -> Option<Self> {
+        // fastembed defaults to ./.fastembed_cache; redirect to data dir
+        unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", cache_dir) };
         let client = rig_fastembed::Client::new();
         let model = client.embedding_model(&rig_fastembed::FastembedModel::AllMiniLML6V2Q).ok()?;
         Some(Self { model })
@@ -47,7 +49,7 @@ impl Index {
     pub async fn build(owner_root: &Path, data_dir: &Path) -> Self {
         let mut entries = Vec::new();
         let _ = collect_files(owner_root, data_dir, &mut entries);
-        let embedder = Embedder::new();
+        let embedder = Embedder::new(&data_dir.join(".fastembed_cache"));
 
         if let Some(ref e) = embedder {
             let texts: Vec<String> = entries.iter().map(|en| en.content.clone()).collect();

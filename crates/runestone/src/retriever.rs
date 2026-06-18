@@ -113,7 +113,9 @@ fn extract_snippet(content: &str, terms: &[String], max_len: usize) -> String {
     };
 
     let start = pos.saturating_sub(max_len / 3);
+    let start = content.floor_char_boundary(start);
     let end = (pos + max_len * 2 / 3).min(content.len());
+    let end = content.ceil_char_boundary(end);
     let snippet: String = content[start..end].chars().collect();
     let prefix = if start > 0 { "..." } else { "" };
     let suffix = if end < content.len() { "..." } else { "" };
