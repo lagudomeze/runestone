@@ -191,7 +191,6 @@ async fn test_session_agent_isolation() {
 fn test_agent_memory_list_isolation() {
     let (rs, _dir) = setup("mem_isolation");
     let bot_a = rs.agent("bot-a");
-    let bot_b = rs.agent("bot-b");
 
     // Store global memories — visible to Runestone but not to Agent
     rs.memory_store(&Profile, &"User".to_string()).unwrap();

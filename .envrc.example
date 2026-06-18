@@ -11,5 +11,8 @@ export OPENAI_API_KEY="sk-..."
 # Optional — override model
 # export RUNESTONE_MODEL="gpt-4o-mini"
 
+# Git remote for memory data sync (optional)
+# export RUNESTONE_REMOTE="git@github.com:user/runestone-memory.git"
+
 # Suppress TLS certificate permission warnings
 export RUST_LOG=runestone=info,rustls_platform_verifier=error

@@ -510,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_noop_extractor() {
-        let ext = NoopExtractor;
+        let ext = test_extractor();
         let changes = ext.extract(&[]).await.unwrap();
         assert!(changes.is_empty());
     }
