@@ -87,10 +87,13 @@ enum MemoryCmd {
         limit: usize,
     },
     /// Context injection — for Claude Code SessionStart hook (outputs
-    /// <runestone-context>)
+    /// <runestone-context>). Use --query for semantic matching; without it,
+    /// shows recent abstracts.
     Inject {
         #[arg(long, default_value = "5")]
         recent: usize,
+        #[arg(long)]
+        query: Option<String>,
     },
     List {
         #[arg(long)]
@@ -113,6 +116,11 @@ enum MemoryCmd {
         key: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+    },
+    /// Scan for duplicate and stale memory entries
+    Clean {
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -247,22 +255,38 @@ async fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) 
             }
             println!("</runestone-recall>");
         }
-        MemoryCmd::Inject { recent } => {
+        MemoryCmd::Inject { recent, query } => {
             println!("<runestone-context>");
-            if let Ok(files) = rs.memory_list() {
-                let abstracts: Vec<&String> =
-                    files.iter().filter(|f| f.contains(".abstract.md")).collect();
-                for f in abstracts.iter().take(recent) {
-                    // memory_list returns paths relative to ./data/
-                    let path = std::path::PathBuf::from("./data").join(f);
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let short =
-                            f.replace("/.abstract.md", "").replace(&format!("{}/", rs.owner()), "");
-                        println!("- **{short}**: {}", content.trim());
+            if let Some(q) = query {
+                // Semantic recall, reformatted as context
+                match rs.memory_search_deep(&q, recent).await {
+                    Ok(hits) => {
+                        for hit in &hits {
+                            println!("- **{}**: {}", hit.path, hit.snippet.trim());
+                        }
+                        if hits.is_empty() {
+                            println!("(no matching memories)");
+                        }
                     }
+                    Err(_) => println!("(recall failed)"),
                 }
-                if abstracts.is_empty() {
-                    println!("(no context yet)");
+            } else {
+                // Fallback: recent abstracts
+                if let Ok(files) = rs.memory_list() {
+                    let abstracts: Vec<&String> =
+                        files.iter().filter(|f| f.contains(".abstract.md")).collect();
+                    for f in abstracts.iter().take(recent) {
+                        let path = std::path::PathBuf::from("./data").join(f);
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let short = f
+                                .replace("/.abstract.md", "")
+                                .replace(&format!("{}/", rs.owner()), "");
+                            println!("- **{short}**: {}", content.trim());
+                        }
+                    }
+                    if abstracts.is_empty() {
+                        println!("(no context yet)");
+                    }
                 }
             }
             println!("</runestone-context>");
@@ -286,6 +310,26 @@ async fn handle_memory<E: Extractor + Clone>(rs: &Runestone<E>, cmd: MemoryCmd) 
             Some(v) => println!("{v}"),
             None => println!("(not found)"),
         },
+        MemoryCmd::Clean { dry_run } => {
+            let report = rs.memory_clean(dry_run)?;
+            println!("Memory: {} files", report.total_files);
+            for (kind, count) in &report.counts {
+                println!("  {kind}: {count}");
+            }
+            if report.duplicates.is_empty() {
+                println!("\nNo duplicates found.");
+            } else {
+                println!("\nDuplicate groups ({}):", report.duplicates.len());
+                for g in &report.duplicates {
+                    println!("  [{kind}]", kind = g.kind);
+                    println!("    - {}  ({})", g.a.0, g.a.1.display());
+                    println!("    - {}  ({})", g.b.0, g.b.1.display());
+                }
+                if dry_run {
+                    println!("\nRun without --dry-run to merge duplicates.");
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -294,7 +338,7 @@ fn dispatch_store<E: Extractor>(
     rs: &Runestone<E>,
     kind: &str,
     key: Option<String>,
-    agent: Option<String>,
+    _agent: Option<String>,
     content: &str,
 ) -> Result<()> {
     let v = content.to_string();
@@ -313,9 +357,8 @@ fn dispatch_store<E: Extractor>(
             rs.memory_store(&Event { title: t }, &v)
         }
         "case" => {
-            let a = agent.ok_or_else(|| RunestoneError::Other("--agent required".into()))?;
             let t = key.ok_or_else(|| RunestoneError::Other("--key required".into()))?;
-            rs.memory_store(&Case { agent: a, title: t }, &v)
+            rs.memory_store(&Case { title: t }, &v)
         }
         _ => Err(RunestoneError::Other(format!(
             "unknown kind '{kind}'. Valid: profile, preference, entity, event, case"
@@ -328,7 +371,7 @@ fn dispatch_load<E: Extractor>(
     rs: &Runestone<E>,
     kind: &str,
     key: Option<String>,
-    agent: Option<String>,
+    _agent: Option<String>,
 ) -> Result<Option<String>> {
     match kind {
         "profile" => rs.memory_load(&Profile),
@@ -345,9 +388,8 @@ fn dispatch_load<E: Extractor>(
             rs.memory_load(&Event { title: t })
         }
         "case" => {
-            let a = agent.ok_or_else(|| RunestoneError::Other("--agent required".into()))?;
             let t = key.ok_or_else(|| RunestoneError::Other("--key required".into()))?;
-            rs.memory_load(&Case { agent: a, title: t })
+            rs.memory_load(&Case { title: t })
         }
         _ => Err(RunestoneError::Other(format!(
             "unknown kind '{kind}'. Valid: profile, preference, entity, event, case"

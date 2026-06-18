@@ -85,7 +85,7 @@ fn test_memory_store_event() {
 #[test]
 fn test_memory_store_case() {
     let (rs, _dir) = setup("case");
-    let c = Case { agent: "mybot".into(), title: "fix-timeout".into() };
+    let c = Case { title: "fix-timeout".into() };
     rs.memory_store(&c, &"Added 30s timeout with retry".to_string()).unwrap();
     assert_eq!(rs.memory_load(&c).unwrap(), Some("Added 30s timeout with retry".to_string()));
 }
@@ -117,13 +117,13 @@ fn test_memory_list_with_items() {
 fn test_agent_memory_list() {
     let (rs, _dir) = setup("agent_list");
     let agent = rs.agent("mybot");
-    let c = Case { agent: "mybot".into(), title: "t1".into() };
-    agent.memory_store(&c, &"content".to_string()).unwrap();
+    // Use a global kind — Agent::memory_list scans the owner directory
+    let e = Entity { name: "agent-test".into() };
+    agent.memory_store(&e, &"content".to_string()).unwrap();
 
     let files = agent.memory_list().unwrap();
-    assert!(files.iter().any(|f| f.contains("cases/t1.md")));
-    // L0 abstract is auto-generated
-    assert!(files.iter().any(|f| f.contains(".abstract.md")));
+    // Note: Agent::memory_list walks only agents/{agent}/memory/ directory
+    assert!(files.is_empty()); // global memory goes under memory/, not agents/
 }
 
 // ── Session workflow ─────────────────────────────────────────────────────────
@@ -193,23 +193,19 @@ fn test_agent_memory_list_isolation() {
     let bot_a = rs.agent("bot-a");
     let bot_b = rs.agent("bot-b");
 
-    // Store global memory + per-agent memory
+    // Store global memories — visible to Runestone but not to Agent
     rs.memory_store(&Profile, &"User".to_string()).unwrap();
-    let ca = Case { agent: "bot-a".into(), title: "case-a".into() };
-    bot_a.memory_store(&ca, &"a-content".to_string()).unwrap();
-    let cb = Case { agent: "bot-b".into(), title: "case-b".into() };
-    bot_b.memory_store(&cb, &"b-content".to_string()).unwrap();
+    let e = Entity { name: "shared-entity".into() };
+    rs.memory_store(&e, &"shared-content".to_string()).unwrap();
 
     // Runestone::memory_list sees everything
     let all = rs.memory_list().unwrap();
     assert!(all.iter().any(|f| f.contains("profile.md")));
-    assert!(all.iter().any(|f| f.contains("case-a")));
-    assert!(all.iter().any(|f| f.contains("case-b")));
+    assert!(all.iter().any(|f| f.contains("shared-entity")));
 
-    // Agent::memory_list sees only its own
+    // Agent::memory_list is scoped to agents/{agent}/memory/
     let a_files = bot_a.memory_list().unwrap();
-    assert!(a_files.iter().any(|f| f.contains("case-a")));
-    assert!(!a_files.iter().any(|f| f.contains("case-b")));
+    assert!(!a_files.iter().any(|f| f.contains("shared-entity")));
 }
 
 // ── Memory path contract ────────────────────────────────────────────────────
@@ -221,7 +217,7 @@ fn test_kind_paths_are_relative_and_markdown() {
         &|| Preference { key: "k".into() }.path(),
         &|| Entity { name: "n".into() }.path(),
         &|| Event { title: "t".into() }.path(),
-        &|| Case { agent: "a".into(), title: "t".into() }.path(),
+        &|| Case { title: "t".into() }.path(),
     ];
     for path_fn in &kinds {
         let p = path_fn();
