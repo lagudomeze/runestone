@@ -174,11 +174,27 @@ impl<E: Extractor> Runestone<E> {
         Err(RunestoneError::Other("resource_add is not yet implemented (Phase 2)".into()).into())
     }
 
+    /// Initialise the owner's data directory by cloning a remote repo.
+    pub fn git_init(&self, remote_url: &str) -> Result<()> {
+        let path = self.data_dir.join(&self.owner);
+        tracing::debug!("[init] cloning {remote_url} into {path:?}");
+        crate::git_repo::GitRepo::clone(&path, remote_url)?;
+        tracing::debug!("[init] done");
+        Ok(())
+    }
+
     /// Sync the owner's git repo with a remote: pull rebase, then push.
     pub fn sync(&self, remote_url: &str) -> Result<()> {
+        tracing::debug!("[sync] opening repo at {:?}", self.data_dir.join(&self.owner));
         let repo = crate::git_repo::GitRepo::open_or_init(&self.data_dir.join(&self.owner))?;
+        tracing::debug!("[sync] committing pending changes...");
+        repo.commit_all("runestone sync auto-commit")?;
+        tracing::debug!("[sync] pull_rebase...");
         repo.pull_rebase(remote_url)?;
-        repo.push(remote_url)
+        tracing::debug!("[sync] push...");
+        repo.push(remote_url)?;
+        tracing::debug!("[sync] done");
+        Ok(())
     }
 }
 

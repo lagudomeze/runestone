@@ -118,7 +118,12 @@ enum MemoryCmd {
 
 #[derive(Subcommand)]
 enum GitCmd {
-    /// Sync with a remote git repository (push + pull rebase)
+    /// Clone a remote memory repository into the data directory
+    Init {
+        #[arg(long)]
+        remote: String,
+    },
+    /// Commit pending changes, pull rebase, and push
     Sync {
         #[arg(long)]
         remote: String,
@@ -353,6 +358,10 @@ fn dispatch_load<E: Extractor>(
 
 fn handle_git<E: Extractor>(rs: &Runestone<E>, cmd: GitCmd) -> Result<()> {
     match cmd {
+        GitCmd::Init { remote } => {
+            rs.git_init(&remote)?;
+            println!("Initialized from {remote}");
+        }
         GitCmd::Sync { remote } => {
             rs.sync(&remote)?;
             println!("Synced with {remote}");

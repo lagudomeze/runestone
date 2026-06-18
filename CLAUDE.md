@@ -120,3 +120,9 @@ let content = std::fs::read_to_string(path)?;
 - **Phase 1 (done)**: session CRUD, offset-based commit, per-owner git, Agent abstraction, MemoryKind trait, memory_store/load/list, lib+bin split.
 - **Phase 2 (done)**: `Extractor` trait, rig-backed `RigExtractor`, `session_commit` wired to extraction. `resource_add` is stubbed.
 - **Stubs**: `memory_search`, `git sync`, `index rebuild` — print "not yet implemented" and return `Ok(())`.
+
+<!-- RUNESTONE:START -->
+<runestone-context>
+(no context yet)
+</runestone-context>
+<!-- RUNESTONE:END -->
