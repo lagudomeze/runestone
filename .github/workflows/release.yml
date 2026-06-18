@@ -26,6 +26,7 @@ jobs:
           mkdir -p release
           cp target/release/runestone release/
           cp -r .claude/skills/rune release/skill-rune
+          cp install-claude-code.sh release/
           cp README.md release/
           tar czf runestone-$(git describe --tags).tar.gz -C release .
           echo "ARTIFACT=runestone-$(git describe --tags).tar.gz" >> $GITHUB_ENV

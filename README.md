@@ -1,85 +1,103 @@
 # Runestone
 
-Personal AI memory system — cross-project, Git-backed, vendor-neutral.
+**跨项目的个人 AI 记忆系统。** Claude Code 的记忆是项目级的——项目 A 的约定和偏好，到了项目 B 就得重新教。Runestone 把记忆提升到**人**的层面，所有项目共享。
 
-Claude Code remembers things per-project. Runestone remembers things about **you**,
-across all projects. Store preferences, patterns, lessons learned, and concepts in
-a Git repository you control.
+基于 Rust + Git，数据完全由你控制。可通过 Claude Code `/rune` skill 使用。
 
-## Install
+## 安装
 
 ```bash
-git clone git@github.com:lagudomeze/runestone.git
-cd runestone
-cargo install --path crates/runestone-cli
+# 在当前项目的 Claude Code 中安装
+bash install-claude-code.sh
+
+# 或者指定项目目录
+bash install-claude-code.sh /path/to/your-project
 ```
 
-Requires Rust 1.96+. The binary is a single static executable.
+安装脚本会：
+1. 下载 `runestone` 二进制到 `~/.local/bin/`
+2. 把 `/rune` skill 复制到项目的 `.claude/skills/rune/`
 
-## Quick start
+## 配置
+
+在项目的 `.envrc` 中添加：
 
 ```bash
-# Configure
-cp .envrc.example .envrc   # Add OPENAI_API_KEY, RUNESTONE_OWNER, RUNESTONE_REMOTE
-direnv allow
-
-# Store a preference
-runestone --owner yubiao memory store \
-  --kind preference --key "commit-style" --content "Use conventional commits (feat/fix/refactor)"
-
-# Search memories
-runestone --owner yubiao memory search --query "commit"
-
-# Sync to GitHub
-runestone --owner yubiao git sync --remote git@github.com:you/memory.git
+export RUNESTONE_OWNER="$(whoami)"
+export RUNESTONE_REMOTE="git@github.com:你的用户名/记忆仓库.git"
+export OPENAI_API_KEY="sk-..."
 ```
 
-## Claude Code integration — `/rune`
-
-Drop the skill into any project:
+记忆仓库需要提前在 GitHub 创建（建议设为私有）。首次使用前再执行一次初始同步：
 
 ```bash
-cp -r skills/rune /your-project/.claude/skills/
+runestone --owner "$RUNESTONE_OWNER" git sync --remote "$RUNESTONE_REMOTE"
 ```
 
-Then use `/rune` in Claude Code:
+## 使用 /rune
+
+在 Claude Code 中：
+
+### 记住经验
+
+当你发现一个值得跨项目保留的经验或偏好时：
 
 ```
-/rune remember "git2 credential callback dead loop on empty remote"
-/rune recall "git branch naming"
-/rune list
-/rune sync
-/rune clean
+/rune remember "我对 Git 分支命名偏好 kebab-case，用 conventional commits 格式"
 ```
 
-Memories persist across all your projects — teach Claude once, it knows everywhere.
+Claude 会：
+1. 理解你的意思，分类为 `preference`
+2. 生成标题：`git 分支命名和提交规范`
+3. 展开为结构化内容并写入记忆
+4. 存储到 `./data/yubiao/memory/preferences/git 分支命名和提交规范.md`
 
-## Memory model
+### 在新项目中回忆
 
-| Kind | Example | Path |
-|------|---------|------|
-| `profile` | "Backend developer, Rust primary" | `memory/profile.md` |
-| `preference` | "kebab-case git branches" | `memory/preferences/git-branch-naming.md` |
-| `entity` | "OpenViking context database" | `memory/entities/openviking.md` |
-| `case` | "git2 hangs on empty remote fetch" | `memory/cases/git2-empty-remote.md` |
-
-All stored as Markdown files in `./data/{owner}/memory/`. Git-versioned, human-readable, portable.
-
-## Architecture
+打开新项目，直接问：
 
 ```
-crates/
-├── runestone/         # Library: Runestone, Agent, SessionManager, GitRepo, Extractor
-└── runestone-cli/     # Binary: clap CLI
-
-data/{owner}/
-├── memory/            # Personal memories (preferences, entities, cases, events, profile)
-└── agents/{agent}/    # Agent-scoped sessions (legacy, being phased out)
+/rune recall "git 分支命名"
 ```
 
-Key decisions: Rust 2024, git2 (not gitoxide), rig for LLM extraction, `tracing` for logging.
+Claude 从你的个人记忆中搜索，返回匹配结果，并**主动问你是否要应用到当前项目**（写入 CLAUDE.md、生成项目配置等）。
 
-## Commands
+### 查看和整理
+
+```
+/rune list          # 列出所有记忆
+/rune clean         # 扫描重复，交互式整理
+/rune sync          # 推送到 GitHub
+```
+
+## 更多例子
+
+```
+# 记录技术踩坑
+/rune remember "libgit2 的 credential 回调在 SSH 失败时死循环——因为 Cred::ssh_key 返回 Ok 不代表 key 可用，需要轮换凭据源"
+
+# 记录设计决策
+/rune remember "选了 git2 而不是 gitoxide——git2 更成熟稳定，代码量少，适合当前阶段"
+
+# 记录个人偏好
+/rune remember "跟我解释用中文，代码注释用英文，回复简洁不要 emoji"
+
+# 在新项目查
+/rune recall "Rust 错误处理"
+/rune recall "SSH 认证"
+/rune recall "Git 工作流"
+```
+
+## 记忆类型
+
+| 类型 | 说明 | 例子 |
+|------|------|------|
+| `preference` | 习惯、风格、工作方式 | kebab-case 分支、conventional commits |
+| `case` | 踩坑经验、设计决策、bug 模式 | git2 SSH 死循环根因 |
+| `entity` | 概念、模式、知识点 | credential provider 模式 |
+| `profile` | 个人身份和背景 | 后端开发、Rust 主语言 |
+
+## 命令参考
 
 ```
 runestone --owner <name> memory store   --kind <k> --key <k> --content "..."
@@ -87,15 +105,21 @@ runestone --owner <name> memory load    --kind <k> --key <k>
 runestone --owner <name> memory list
 runestone --owner <name> memory search  --query "..."
 runestone --owner <name> memory clean   --dry-run
+runestone --owner <name> memory clean
 
 runestone --owner <name> git init   --remote <url>
 runestone --owner <name> git sync   --remote <url>
-
-runestone --owner <name> session --agent <a> create --session <s>
-runestone --owner <name> session --agent <a> add --session <s> --role user --content "..."
-runestone --owner <name> session --agent <a> commit --session <s>
-runestone --owner <name> session --agent <a> history --session <s>
 ```
+
+## 开发
+
+```
+cargo build
+cargo test
+cargo clippy -- -D warnings
+```
+
+详见 [CLAUDE.md](CLAUDE.md)。
 
 ## License
 
